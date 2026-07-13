@@ -1,0 +1,43 @@
+name: Deploy NeuroScope MRI to Azure
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_NAME: neuroscope
+  ENVIRONMENT: prod
+  AZURE_LOCATION: eastus
+  IMAGE_NAME: neuroscope-mri
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Validate Python files
+        run: bash scripts/ci_check.sh
+
+      - name: Provision infrastructure and deploy
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: bash scripts/azure_deploy.sh

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NeuroScope MRI</title>
+    <meta
+      name="description"
+      content="Flask MRI review application with MONAI BraTS segmentation workflow, image and video overlays, live frame review, and Azure deployment automation."
+    >
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    >
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="NeuroScope MRI home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>
+            <strong>NeuroScope MRI</strong>
+            <small>Brain tumor segmentation console</small>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <span class="status-dot"><span></span>Azure-ready</span>
+          <a class="ghost-link" href="/metrics" target="_blank" rel="noreferrer">Metrics</a>
+        </div>
+      </header>
+
+      <main class="hero-grid">
+        <section class="intake-panel" aria-label="MRI analysis controls">
+          <div class="panel-heading">
+            <p class="eyebrow">MRI Intake</p>
+            <h1>Find suspicious tumor regions from MRI studies.</h1>
+            <p class="clinical-note">
+              Research preview only. Results must be reviewed by qualified medical professionals.
+            </p>
+          </div>
+
+          <div class="mode-tabs" role="tablist" aria-label="Analysis mode">
+            <button class="mode-tab active" type="button" data-mode="single" role="tab" aria-selected="true">
+              Image or Video
+            </button>
+            <button class="mode-tab" type="button" data-mode="volume" role="tab" aria-selected="false">
+              3D MRI
+            </button>
+            <button class="mode-tab" type="button" data-mode="live" role="tab" aria-selected="false">
+              Live Check
+            </button>
+          </div>
+
+          <form class="mode-pane active" id="singleForm" data-pane="single">
+            <label class="dropzone" id="dropzone">
+              <input id="scanInput" name="scan" type="file" accept="image/*,video/*">
+              <span class="dropzone-icon" aria-hidden="true"></span>
+              <strong id="singleFileName">Drop MRI image or video</strong>
+              <small>PNG, JPG, TIFF, MP4, MOV, AVI, MKV</small>
+            </label>
+            <button class="primary-btn" type="submit">
+              <span class="btn-pulse" aria-hidden="true"></span>
+              Analyze Scan
+            </button>
+          </form>
+
+          <form class="mode-pane volume-grid" id="volumeForm" data-pane="volume">
+            <label class="file-field">
+              <span>T1c</span>
+              <input name="t1c" type="file" accept=".nii,.gz">
+            </label>
+            <label class="file-field">
+              <span>T1</span>
+              <input name="t1" type="file" accept=".nii,.gz">
+            </label>
+            <label class="file-field">
+              <span>T2</span>
+              <input name="t2" type="file" accept=".nii,.gz">
+            </label>
+            <label class="file-field">
+              <span>FLAIR</span>
+              <input name="flair" type="file" accept=".nii,.gz">
+            </label>
+            <button class="primary-btn span-all" type="submit">
+              <span class="btn-pulse" aria-hidden="true"></span>
+              Run 3D MONAI Segmentation
+            </button>
+          </form>
+
+          <section class="mode-pane live-pane" id="livePane" data-pane="live">
+            <div class="camera-frame">
+              <video id="cameraFeed" autoplay playsinline muted></video>
+              <canvas id="captureCanvas" hidden></canvas>
+              <div class="camera-empty" id="cameraEmpty">Camera inactive</div>
+            </div>
+            <div class="live-actions">
+              <button class="secondary-btn" id="startCamera" type="button">Start Camera</button>
+              <button class="primary-btn" id="captureFrame" type="button">
+                <span class="btn-pulse" aria-hidden="true"></span>
+                Analyze Frame
+              </button>
+            </div>
+          </section>
+
+          <div class="trust-row" aria-label="System safeguards">
+            <span>MONAI BraTS bundle</span>
+            <span>AKS deployment</span>
+            <span>Azure Monitor</span>
+          </div>
+        </section>
+
+        <section class="viewer-panel" aria-label="MRI result viewer">
+          <div class="viewer-topline">
+            <div>
+              <p class="eyebrow">Detection View</p>
+              <h2 id="viewerTitle">Awaiting scan</h2>
+            </div>
+            <span class="model-chip" id="modelChip">Model idle</span>
+          </div>
+
+          <div class="scan-stage" id="scanStage">
+            <canvas id="mriCanvas" width="900" height="660" aria-label="Animated MRI preview"></canvas>
+            <img id="resultImage" alt="MRI analysis overlay" hidden>
+            <div class="scanline" aria-hidden="true"></div>
+            <div class="corner corner-a" aria-hidden="true"></div>
+            <div class="corner corner-b" aria-hidden="true"></div>
+            <div class="corner corner-c" aria-hidden="true"></div>
+            <div class="corner corner-d" aria-hidden="true"></div>
+          </div>
+
+          <div class="metric-strip">
+            <div>
+              <small>Status</small>
+              <strong id="metricStatus">Ready</strong>
+            </div>
+            <div>
+              <small>Regions</small>
+              <strong id="metricRegions">0</strong>
+            </div>
+            <div>
+              <small>Latency</small>
+              <strong id="metricLatency">0 ms</strong>
+            </div>
+          </div>
+
+          <div class="result-feed" id="resultFeed">
+            <article class="finding-card empty">
+              <span></span>
+              <div>
+                <strong>Clinical workflow ready</strong>
+                <p>Upload a scan, run the 3D MRI model, or check a live frame.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <section class="monitor-band" aria-label="Azure monitoring summary">
+        <div>
+          <small>Deployment</small>
+          <strong>GitHub Actions + Jenkinsfile</strong>
+        </div>
+        <div>
+          <small>Infrastructure</small>
+          <strong>AKS, ACR, Log Analytics</strong>
+        </div>
+        <div>
+          <small>Observability</small>
+          <strong>Health probes + Prometheus metrics</strong>
+        </div>
+        <div>
+          <small>Model source</small>
+          <strong>MONAI Model Zoo</strong>
+        </div>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  </body>
+</html>

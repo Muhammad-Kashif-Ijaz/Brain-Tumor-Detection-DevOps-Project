@@ -1,0 +1,16 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+instance
+outputs
+work
+infra/terraform/.terraform
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+infra/terraform/*.tfplan
+README-assets

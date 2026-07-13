@@ -1,0 +1,95 @@
+import time
+import uuid
+from pathlib import Path
+
+from flask import Blueprint, Response, current_app, jsonify, render_template, request, send_from_directory, url_for
+from werkzeug.utils import secure_filename
+
+from . import metrics
+
+
+bp = Blueprint("mri", __name__)
+
+
+@bp.before_app_request
+def before_request():
+    metrics.record_request()
+
+
+@bp.get("/")
+def index():
+    return render_template("index.html")
+
+
+@bp.get("/healthz")
+def healthz():
+    return jsonify({"status": "ok"})
+
+
+@bp.get("/metrics")
+def prometheus_metrics():
+    return Response(metrics.render_metrics(), mimetype="text/plain; version=0.0.4")
+
+
+@bp.get("/results/<path:filename>")
+def result_file(filename):
+    return send_from_directory(current_app.config["RESULT_FOLDER"], filename)
+
+
+@bp.post("/api/analyze")
+def analyze_upload():
+    started = time.time()
+    service = current_app.extensions["inference_service"]
+    upload_dir = Path(current_app.config["UPLOAD_FOLDER"])
+    try:
+        modality_paths = _save_modalities(upload_dir)
+        if modality_paths:
+            result = service.analyze_multimodal_nifti(modality_paths)
+        else:
+            upload = request.files.get("scan")
+            if not upload or not upload.filename:
+                return jsonify({"status": "error", "message": "Choose an MRI image, video, or NIfTI files."}), 400
+            saved_path = _save_upload(upload, upload_dir)
+            result = service.analyze_file(saved_path)
+        metrics.record_analysis(time.time() - started, ok=result.status == "ok")
+        return jsonify(_with_overlay_url(result.to_dict()))
+    except Exception as exc:
+        metrics.record_analysis(time.time() - started, ok=False)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@bp.post("/api/live-frame")
+def analyze_live_frame():
+    started = time.time()
+    service = current_app.extensions["inference_service"]
+    payload = request.get_json(silent=True) or {}
+    frame = payload.get("frame")
+    if not frame:
+        return jsonify({"status": "error", "message": "Missing live frame."}), 400
+    result = service.analyze_live_frame(frame)
+    metrics.record_analysis(time.time() - started, ok=result.status == "ok")
+    return jsonify(_with_overlay_url(result.to_dict()))
+
+
+def _save_upload(file_storage, upload_dir: Path) -> Path:
+    filename = secure_filename(file_storage.filename or "scan")
+    saved_name = f"{uuid.uuid4().hex}-{filename}"
+    saved_path = upload_dir / saved_name
+    file_storage.save(saved_path)
+    return saved_path
+
+
+def _save_modalities(upload_dir: Path):
+    modality_paths = {}
+    for modality in ("t1c", "t1", "t2", "flair"):
+        upload = request.files.get(modality)
+        if upload and upload.filename:
+            modality_paths[modality] = _save_upload(upload, upload_dir)
+    return modality_paths
+
+
+def _with_overlay_url(payload):
+    filename = payload.get("overlay_filename")
+    if filename:
+        payload["overlay_url"] = url_for("mri.result_file", filename=filename)
+    return payload

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+instance/
+.pytest_cache/
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+work/
+outputs/

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuroscope-mri
+  namespace: neuroscope
+  labels:
+    app: neuroscope-mri
+spec:
+  type: LoadBalancer
+  selector:
+    app: neuroscope-mri
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

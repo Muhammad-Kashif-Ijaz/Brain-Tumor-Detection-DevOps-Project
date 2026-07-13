@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neuroscope-mri
+  namespace: neuroscope
+  labels:
+    app: neuroscope-mri
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: neuroscope-mri
+  template:
+    metadata:
+      labels:
+        app: neuroscope-mri
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "5000"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: neuroscope-mri
+          image: nginx:stable-alpine
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 5000
+          env:
+            - name: APP_STORAGE_DIR
+              value: /app/instance
+            - name: AUTO_DOWNLOAD_MODEL
+              value: "true"
+            - name: MAX_UPLOAD_MB
+              value: "512"
+            - name: MAX_VIDEO_FRAMES
+              value: "10"
+            - name: MODEL_BUNDLE_DIR
+              value: /app/instance/models
+            - name: UPLOAD_FOLDER
+              value: /app/instance/uploads
+            - name: RESULT_FOLDER
+              value: /app/instance/results
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 12
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 40
+            periodSeconds: 20
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 18
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 6Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: app-storage
+              mountPath: /app/instance
+      volumes:
+        - name: app-storage
+          azureFile:
+            secretName: azure-storage-secret
+            shareName: __FILE_SHARE_NAME__
+            readOnly: false
