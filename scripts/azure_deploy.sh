@@ -13,6 +13,7 @@ IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d
 NAMESPACE="${K8S_NAMESPACE:-neuroscope}"
 TERRAFORM_DIR="${TERRAFORM_DIR:-infra/terraform}"
 STATE_CONTAINER="${STATE_CONTAINER:-tfstate}"
+K8S_ROLLOUT_TIMEOUT="${K8S_ROLLOUT_TIMEOUT:-20m}"
 
 require_tool() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -221,6 +222,26 @@ docker push "$LATEST_URI"
 echo "Deploying to AKS..."
 az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_NAME" --overwrite-existing >/dev/null
 
+dump_k8s_diagnostics() {
+  echo "Deployment did not become ready. Kubernetes diagnostics:"
+  kubectl -n "$NAMESPACE" get pods -o wide || true
+  kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -80 || true
+  kubectl -n "$NAMESPACE" describe deployment neuroscope-mri || true
+  kubectl -n "$NAMESPACE" describe pods -l app=neuroscope-mri || true
+  kubectl -n "$NAMESPACE" logs -l app=neuroscope-mri --all-containers --tail=200 --prefix || true
+}
+
+render_deployment() {
+  "$PYTHON_BIN" - <<PY
+from pathlib import Path
+
+content = Path("k8s/deployment.yaml").read_text(encoding="utf-8")
+content = content.replace("__FILE_SHARE_NAME__", "${FILE_SHARE_NAME}")
+content = content.replace("__IMAGE_URI__", "${IMAGE_URI}")
+print(content)
+PY
+}
+
 kubectl apply -f k8s/namespace.yaml
 kubectl -n "$NAMESPACE" create secret generic azure-storage-secret \
   --from-literal=azurestorageaccountname="$STORAGE_ACCOUNT_NAME" \
@@ -228,17 +249,16 @@ kubectl -n "$NAMESPACE" create secret generic azure-storage-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl apply -f k8s/azure-monitor-agentconfig.yaml
-"$PYTHON_BIN" - <<PY | kubectl apply -f -
-from pathlib import Path
-
-content = Path("k8s/deployment.yaml").read_text(encoding="utf-8")
-content = content.replace("__FILE_SHARE_NAME__", "${FILE_SHARE_NAME}")
-print(content)
-PY
 kubectl apply -f k8s/service.yaml
+
+kubectl -n "$NAMESPACE" delete hpa neuroscope-mri --ignore-not-found=true
+kubectl -n "$NAMESPACE" delete deployment neuroscope-mri --ignore-not-found=true
+render_deployment | kubectl apply -f -
 kubectl apply -f k8s/hpa.yaml
-kubectl -n "$NAMESPACE" set image deployment/neuroscope-mri neuroscope-mri="$IMAGE_URI"
-kubectl -n "$NAMESPACE" rollout status deployment/neuroscope-mri --timeout=12m
+if ! kubectl -n "$NAMESPACE" rollout status deployment/neuroscope-mri --timeout="$K8S_ROLLOUT_TIMEOUT"; then
+  dump_k8s_diagnostics
+  exit 1
+fi
 
 echo "Waiting for public endpoint..."
 PUBLIC_IP=""

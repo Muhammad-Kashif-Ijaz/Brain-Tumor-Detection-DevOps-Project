@@ -44,6 +44,8 @@ The deployment script checks candidate Azure regions before running Terraform. I
 
 Terraform state storage may stay in the original region even when the app region changes. The deployment script reuses the existing state resource group location and deploys the AKS app resources in the selected quota-friendly region.
 
+The Kubernetes deployment is applied cleanly each run: the workflow renders the real container image directly into the manifest, replaces the previous demo deployment, waits up to 20 minutes, and prints pod events/logs automatically if rollout fails.
+
 Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal JSON:
 
 ```json
