@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_NAME="${PROJECT_NAME:-neuroscope}"
 ENVIRONMENT="${ENVIRONMENT:-prod}"
 AZURE_LOCATION="${AZURE_LOCATION:-eastus}"
+AKS_NODE_VM_SIZE="${AKS_NODE_VM_SIZE:-Standard_D2s_v7}"
 IMAGE_NAME="${IMAGE_NAME:-neuroscope-mri}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
 NAMESPACE="${K8S_NAMESPACE:-neuroscope}"
@@ -86,7 +87,8 @@ terraform init -input=false -reconfigure \
 terraform apply -input=false -auto-approve \
   -var="project_name=${PROJECT_NAME}" \
   -var="environment=${ENVIRONMENT}" \
-  -var="location=${AZURE_LOCATION}"
+  -var="location=${AZURE_LOCATION}" \
+  -var="node_vm_size=${AKS_NODE_VM_SIZE}"
 
 ACR_NAME="$(terraform output -raw acr_name)"
 ACR_LOGIN_SERVER="$(terraform output -raw acr_login_server)"

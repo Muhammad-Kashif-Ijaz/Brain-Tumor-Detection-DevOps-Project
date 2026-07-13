@@ -23,9 +23,9 @@ variable "node_count" {
 }
 
 variable "node_vm_size" {
-  description = "AKS node VM size. B2ms is a low-cost demo default; increase this for heavier 3D inference workloads."
+  description = "AKS node VM size. Standard_D2s_v7 is a small size from the current allowed eastus list for this subscription."
   type        = string
-  default     = "Standard_B2ms"
+  default     = "Standard_D2s_v7"
 }
 
 variable "file_share_name" {

@@ -10,6 +10,7 @@ env:
   PROJECT_NAME: neuroscope
   ENVIRONMENT: prod
   AZURE_LOCATION: eastus
+  AKS_NODE_VM_SIZE: Standard_D2s_v7
   IMAGE_NAME: neuroscope-mri
 
 jobs:
