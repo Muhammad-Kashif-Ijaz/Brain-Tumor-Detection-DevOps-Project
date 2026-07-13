@@ -6,7 +6,7 @@ metadata:
   labels:
     app: neuroscope-mri
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: neuroscope-mri
@@ -65,11 +65,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 500m
-              memory: 2Gi
+              cpu: 300m
+              memory: 1536Mi
             limits:
-              cpu: "2"
-              memory: 6Gi
+              cpu: "1750m"
+              memory: 5Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

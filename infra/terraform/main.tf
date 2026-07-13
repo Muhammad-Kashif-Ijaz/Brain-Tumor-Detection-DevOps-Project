@@ -67,7 +67,7 @@ resource "azurerm_storage_account" "main" {
 resource "azurerm_storage_share" "app" {
   name               = var.file_share_name
   storage_account_id = azurerm_storage_account.main.id
-  quota              = 100
+  quota              = var.file_share_quota_gb
 }
 
 resource "azurerm_kubernetes_cluster" "main" {

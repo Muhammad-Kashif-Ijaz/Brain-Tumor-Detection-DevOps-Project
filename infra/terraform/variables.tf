@@ -19,17 +19,23 @@ variable "location" {
 variable "node_count" {
   description = "Initial AKS node count."
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "node_vm_size" {
-  description = "AKS node VM size. Increase this for heavier 3D inference workloads."
+  description = "AKS node VM size. B2ms is a low-cost demo default; increase this for heavier 3D inference workloads."
   type        = string
-  default     = "Standard_D4s_v5"
+  default     = "Standard_B2ms"
 }
 
 variable "file_share_name" {
   description = "Azure Files share mounted by the application."
   type        = string
   default     = "neuroscope-data"
+}
+
+variable "file_share_quota_gb" {
+  description = "Azure Files quota in GB for uploads, overlays, and model cache."
+  type        = number
+  default     = 20
 }

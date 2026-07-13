@@ -36,6 +36,8 @@ python scripts/download_model.py
 
 ## Deploy With Only GitHub Secrets
 
+The default Terraform settings are sized for an Azure free/trial demo: one `Standard_B2ms` AKS node, one app replica, and a 20 GB Azure Files share. It is not a true zero-cost production setup because AKS worker nodes, storage, and monitoring can consume credits. For heavier 3D MRI inference, increase `node_vm_size`, `node_count`, and Kubernetes memory limits after the demo works.
+
 Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal JSON:
 
 ```json
