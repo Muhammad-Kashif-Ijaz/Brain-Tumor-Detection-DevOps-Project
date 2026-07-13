@@ -152,15 +152,28 @@ STATE_HASH="$("$PYTHON_BIN" -c "import hashlib,sys; print(hashlib.sha256(sys.arg
 STATE_RG="${STATE_RG:-${PROJECT_NAME}-${ENVIRONMENT}-tfstate-rg}"
 STATE_SA="${STATE_SA:-tfst${STATE_HASH}}"
 STATE_KEY="${STATE_KEY:-${PROJECT_NAME}-${ENVIRONMENT}.tfstate}"
+STATE_LOCATION="${STATE_LOCATION:-}"
 
-echo "Preparing Terraform state storage..."
-az group create --name "$STATE_RG" --location "$AZURE_LOCATION" >/dev/null
+resource_group_location() {
+  local group_name="$1"
+  az group show --name "$group_name" --query location -o tsv 2>/dev/null || true
+}
+
+existing_state_location="$(resource_group_location "$STATE_RG")"
+if [ -n "$existing_state_location" ]; then
+  STATE_LOCATION="$existing_state_location"
+else
+  STATE_LOCATION="${STATE_LOCATION:-$AZURE_LOCATION}"
+fi
+
+echo "Preparing Terraform state storage in ${STATE_LOCATION}..."
+az group create --name "$STATE_RG" --location "$STATE_LOCATION" >/dev/null
 
 if ! az storage account show --name "$STATE_SA" --resource-group "$STATE_RG" >/dev/null 2>&1; then
   az storage account create \
     --name "$STATE_SA" \
     --resource-group "$STATE_RG" \
-    --location "$AZURE_LOCATION" \
+    --location "$STATE_LOCATION" \
     --sku Standard_LRS \
     --kind StorageV2 \
     --min-tls-version TLS1_2 \

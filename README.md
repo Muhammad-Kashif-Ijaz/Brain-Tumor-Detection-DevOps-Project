@@ -42,6 +42,8 @@ If Azure rejects the VM size in your region, copy the smallest allowed size from
 
 The deployment script checks candidate Azure regions before running Terraform. If the default region has 0 vCPU quota, it tries the next region listed in `AZURE_LOCATION_CANDIDATES`. If every checked region has 0 quota, request a quota increase in Azure Portal or change `AZURE_LOCATION_CANDIDATES` to include a region where your subscription has quota.
 
+Terraform state storage may stay in the original region even when the app region changes. The deployment script reuses the existing state resource group location and deploys the AKS app resources in the selected quota-friendly region.
+
 Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal JSON:
 
 ```json
