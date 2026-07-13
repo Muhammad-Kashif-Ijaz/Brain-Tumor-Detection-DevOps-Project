@@ -5,6 +5,9 @@ PROJECT_NAME="${PROJECT_NAME:-neuroscope}"
 ENVIRONMENT="${ENVIRONMENT:-prod}"
 AZURE_LOCATION="${AZURE_LOCATION:-eastus}"
 AKS_NODE_VM_SIZE="${AKS_NODE_VM_SIZE:-Standard_D2s_v7}"
+AKS_REQUIRED_VCPUS="${AKS_REQUIRED_VCPUS:-2}"
+AUTO_SELECT_AZURE_LOCATION="${AUTO_SELECT_AZURE_LOCATION:-true}"
+AZURE_LOCATION_CANDIDATES="${AZURE_LOCATION_CANDIDATES:-eastus eastus2 westus2 westus3 centralus southcentralus northeurope westeurope uksouth canadacentral southeastasia centralindia uaenorth}"
 IMAGE_NAME="${IMAGE_NAME:-neuroscope-mri}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
 NAMESPACE="${K8S_NAMESPACE:-neuroscope}"
@@ -49,6 +52,99 @@ fi
 if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
   az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 fi
+
+remaining_vcpus() {
+  local region="$1"
+  local usage_json
+  usage_json="$(az vm list-usage --location "$region" -o json 2>/dev/null || echo '[]')"
+  printf '%s' "$usage_json" | "$PYTHON_BIN" -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print(0)
+    raise SystemExit
+for item in data:
+    if item.get("name", {}).get("value") == "cores":
+        print(max(0, int(item.get("limit", 0)) - int(item.get("currentValue", 0))))
+        break
+else:
+    print(0)
+'
+}
+
+sku_available() {
+  local region="$1"
+  local sku_json
+  sku_json="$(az vm list-skus --location "$region" --resource-type virtualMachines --size "$AKS_NODE_VM_SIZE" --all -o json 2>/dev/null || echo '[]')"
+  printf '%s' "$sku_json" | "$PYTHON_BIN" -c '
+import json
+import sys
+
+sku = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("no")
+    raise SystemExit
+
+for item in data:
+    if item.get("name") == sku and not item.get("restrictions"):
+        print("yes")
+        break
+else:
+    print("no")
+' "$AKS_NODE_VM_SIZE"
+}
+
+select_azure_location() {
+  if [ "$AUTO_SELECT_AZURE_LOCATION" != "true" ]; then
+    return
+  fi
+
+  echo "Checking Azure region quota for AKS node size ${AKS_NODE_VM_SIZE}..."
+  local seen=" "
+  local ordered_regions=""
+  for region in $AZURE_LOCATION $AZURE_LOCATION_CANDIDATES; do
+    if [[ "$seen" != *" $region "* ]]; then
+      seen="${seen}${region} "
+      ordered_regions="${ordered_regions}${region} "
+    fi
+  done
+
+  local best_quota=0
+  local best_region=""
+  for region in $ordered_regions; do
+    local available
+    available="$(sku_available "$region")"
+    if [ "$available" != "yes" ]; then
+      echo "  ${region}: ${AKS_NODE_VM_SIZE} unavailable"
+      continue
+    fi
+
+    local left
+    left="$(remaining_vcpus "$region")"
+    echo "  ${region}: ${left} regional vCPU quota remaining"
+    if [ "$left" -ge "$AKS_REQUIRED_VCPUS" ]; then
+      AZURE_LOCATION="$region"
+      echo "Using Azure region: ${AZURE_LOCATION}"
+      return
+    fi
+    if [ "$left" -gt "$best_quota" ]; then
+      best_quota="$left"
+      best_region="$region"
+    fi
+  done
+
+  echo "No checked Azure region has ${AKS_REQUIRED_VCPUS}+ vCPU quota for ${AKS_NODE_VM_SIZE}." >&2
+  if [ -n "$best_region" ]; then
+    echo "Best checked region was ${best_region} with ${best_quota} vCPU quota remaining." >&2
+  fi
+  echo "Request quota in Azure Portal, set AZURE_LOCATION to a region with quota, or set AKS_NODE_VM_SIZE to another allowed VM size." >&2
+  exit 1
+}
+
+select_azure_location
 
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 HASH_INPUT="${SUBSCRIPTION_ID}-${PROJECT_NAME}-${ENVIRONMENT}"

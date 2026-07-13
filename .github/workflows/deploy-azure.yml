@@ -10,7 +10,10 @@ env:
   PROJECT_NAME: neuroscope
   ENVIRONMENT: prod
   AZURE_LOCATION: eastus
+  AUTO_SELECT_AZURE_LOCATION: "true"
+  AZURE_LOCATION_CANDIDATES: "eastus eastus2 westus2 westus3 centralus southcentralus northeurope westeurope uksouth canadacentral southeastasia centralindia uaenorth"
   AKS_NODE_VM_SIZE: Standard_D2s_v7
+  AKS_REQUIRED_VCPUS: "2"
   IMAGE_NAME: neuroscope-mri
 
 jobs:

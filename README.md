@@ -40,6 +40,8 @@ The default Terraform settings are sized for an Azure free/trial demo: one `Stan
 
 If Azure rejects the VM size in your region, copy the smallest allowed size from the workflow error and set `AKS_NODE_VM_SIZE` in `.github/workflows/deploy-azure.yml`.
 
+The deployment script checks candidate Azure regions before running Terraform. If the default region has 0 vCPU quota, it tries the next region listed in `AZURE_LOCATION_CANDIDATES`. If every checked region has 0 quota, request a quota increase in Azure Portal or change `AZURE_LOCATION_CANDIDATES` to include a region where your subscription has quota.
+
 Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal JSON:
 
 ```json
