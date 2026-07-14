@@ -148,6 +148,9 @@ select_azure_location() {
 select_azure_location
 
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+NORMALIZED_PROJECT="$("$PYTHON_BIN" -c 'import re,sys; print(re.sub(r"[^a-z0-9-]", "-", sys.argv[1].lower()))' "$PROJECT_NAME")"
+APP_PREFIX="${NORMALIZED_PROJECT}-${ENVIRONMENT}"
+APP_RESOURCE_GROUP="${APP_PREFIX}-rg"
 HASH_INPUT="${SUBSCRIPTION_ID}-${PROJECT_NAME}-${ENVIRONMENT}"
 STATE_HASH="$("$PYTHON_BIN" -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])" "$HASH_INPUT")"
 STATE_RG="${STATE_RG:-${PROJECT_NAME}-${ENVIRONMENT}-tfstate-rg}"
@@ -193,6 +196,64 @@ terraform init -input=false -reconfigure \
   -backend-config="storage_account_name=${STATE_SA}" \
   -backend-config="container_name=${STATE_CONTAINER}" \
   -backend-config="key=${STATE_KEY}"
+
+export TF_VAR_project_name="$PROJECT_NAME"
+export TF_VAR_environment="$ENVIRONMENT"
+export TF_VAR_location="$AZURE_LOCATION"
+export TF_VAR_node_vm_size="$AKS_NODE_VM_SIZE"
+
+state_has() {
+  terraform state show "$1" >/dev/null 2>&1
+}
+
+import_if_exists() {
+  local address="$1"
+  local id="$2"
+  local label="$3"
+
+  if state_has "$address"; then
+    echo "Terraform state already tracks ${label}."
+    return
+  fi
+
+  if az resource show --ids "$id" >/dev/null 2>&1; then
+    echo "Importing existing ${label} into Terraform state..."
+    terraform import -input=false "$address" "$id"
+  fi
+}
+
+import_resource_group_if_exists() {
+  local address="$1"
+  local name="$2"
+  local id="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${name}"
+
+  if state_has "$address"; then
+    echo "Terraform state already tracks resource group ${name}."
+    return
+  fi
+
+  if az group show --name "$name" >/dev/null 2>&1; then
+    echo "Importing existing resource group ${name} into Terraform state..."
+    terraform import -input=false "$address" "$id"
+  fi
+}
+
+echo "Reconciling Terraform state with any resources from earlier failed runs..."
+import_resource_group_if_exists \
+  "azurerm_resource_group.main" \
+  "$APP_RESOURCE_GROUP"
+import_if_exists \
+  "azurerm_log_analytics_workspace.main" \
+  "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.OperationalInsights/workspaces/${APP_PREFIX}-logs" \
+  "Log Analytics workspace ${APP_PREFIX}-logs"
+import_if_exists \
+  "azurerm_application_insights.main" \
+  "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Insights/components/${APP_PREFIX}-appi" \
+  "Application Insights component ${APP_PREFIX}-appi"
+import_if_exists \
+  "azurerm_kubernetes_cluster.main" \
+  "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerService/managedClusters/${APP_PREFIX}-aks" \
+  "AKS cluster ${APP_PREFIX}-aks"
 
 terraform_apply() {
   terraform apply -input=false -auto-approve \
