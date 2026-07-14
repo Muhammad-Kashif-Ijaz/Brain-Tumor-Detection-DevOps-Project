@@ -2,13 +2,17 @@ from pathlib import Path
 
 from flask import Flask
 
-from .config import DefaultConfig
+from .config import BASE_DIR, DefaultConfig
 from .inference import BrainTumorInference
 from .routes import bp
 
 
 def create_app(config_override=None):
-    app = Flask(__name__)
+    app = Flask(
+        __name__,
+        template_folder=str(BASE_DIR / "templates"),
+        static_folder=str(BASE_DIR / "static"),
+    )
     app.config.from_object(DefaultConfig)
     if config_override:
         app.config.update(config_override)

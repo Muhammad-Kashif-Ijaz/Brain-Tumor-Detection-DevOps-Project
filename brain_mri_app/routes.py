@@ -26,6 +26,20 @@ def healthz():
     return jsonify({"status": "ok"})
 
 
+@bp.get("/readyz")
+def readyz():
+    root_path = Path(current_app.root_path).parent
+    return jsonify(
+        {
+            "status": "ok",
+            "template_found": (root_path / "templates" / "index.html").exists(),
+            "static_found": (root_path / "static").exists(),
+            "upload_storage_ready": Path(current_app.config["UPLOAD_FOLDER"]).exists(),
+            "result_storage_ready": Path(current_app.config["RESULT_FOLDER"]).exists(),
+        }
+    )
+
+
 @bp.get("/metrics")
 def prometheus_metrics():
     return Response(metrics.render_metrics(), mimetype="text/plain; version=0.0.4")
