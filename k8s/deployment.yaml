@@ -71,11 +71,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 300m
-              memory: 1536Mi
+              cpu: 50m
+              memory: 768Mi
             limits:
-              cpu: "1750m"
-              memory: 5Gi
+              cpu: "1500m"
+              memory: 4Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
