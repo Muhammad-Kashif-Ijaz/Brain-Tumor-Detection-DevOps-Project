@@ -194,11 +194,24 @@ terraform init -input=false -reconfigure \
   -backend-config="container_name=${STATE_CONTAINER}" \
   -backend-config="key=${STATE_KEY}"
 
-terraform apply -input=false -auto-approve \
-  -var="project_name=${PROJECT_NAME}" \
-  -var="environment=${ENVIRONMENT}" \
-  -var="location=${AZURE_LOCATION}" \
-  -var="node_vm_size=${AKS_NODE_VM_SIZE}"
+terraform_apply() {
+  terraform apply -input=false -auto-approve \
+    -var="project_name=${PROJECT_NAME}" \
+    -var="environment=${ENVIRONMENT}" \
+    -var="location=${AZURE_LOCATION}" \
+    -var="node_vm_size=${AKS_NODE_VM_SIZE}"
+}
+
+apply_log="$(mktemp)"
+if ! terraform_apply 2>&1 | tee "$apply_log"; then
+  if grep -Eq "Provider produced inconsistent result after apply|Root object was present, but now absent" "$apply_log"; then
+    echo "Terraform provider returned a transient Azure consistency error. Waiting 90 seconds, then retrying once..."
+    sleep 90
+    terraform_apply
+  else
+    exit 1
+  fi
+fi
 
 ACR_NAME="$(terraform output -raw acr_name)"
 ACR_LOGIN_SERVER="$(terraform output -raw acr_login_server)"
