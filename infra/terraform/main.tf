@@ -1,17 +1,10 @@
-resource "random_string" "suffix" {
-  length  = 8
-  lower   = true
-  numeric = true
-  special = false
-  upper   = false
-}
-
 locals {
   normalized_project = replace(lower(var.project_name), "/[^a-z0-9-]/", "-")
   compact_project    = replace(local.normalized_project, "-", "")
+  name_suffix        = substr(replace(lower(var.name_suffix), "/[^a-z0-9]/", ""), 0, 12)
   prefix             = "${local.normalized_project}-${var.environment}"
-  acr_name           = substr("${local.compact_project}${var.environment}${random_string.suffix.result}", 0, 50)
-  storage_name       = substr("${local.compact_project}${var.environment}${random_string.suffix.result}", 0, 24)
+  acr_name           = substr("${local.compact_project}${var.environment}${local.name_suffix}", 0, 50)
+  storage_name       = substr("${local.compact_project}${var.environment}${local.name_suffix}", 0, 24)
   tags = {
     application = "NeuroScope MRI"
     environment = var.environment

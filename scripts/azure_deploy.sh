@@ -5,8 +5,12 @@ PROJECT_NAME="${PROJECT_NAME:-neuroscope}"
 ENVIRONMENT="${ENVIRONMENT:-prod}"
 AZURE_LOCATION="${AZURE_LOCATION:-eastus}"
 AKS_NODE_VM_SIZE="${AKS_NODE_VM_SIZE:-Standard_D2s_v7}"
+AKS_NODE_COUNT="${AKS_NODE_COUNT:-1}"
 AKS_REQUIRED_VCPUS="${AKS_REQUIRED_VCPUS:-2}"
 AUTO_SELECT_AZURE_LOCATION="${AUTO_SELECT_AZURE_LOCATION:-true}"
+CHECK_AKS_SKU_AVAILABILITY="${CHECK_AKS_SKU_AVAILABILITY:-false}"
+AZURE_CLI_TIMEOUT_SECONDS="${AZURE_CLI_TIMEOUT_SECONDS:-30}"
+TERRAFORM_APPLY_INFRA="${TERRAFORM_APPLY_INFRA:-false}"
 AZURE_LOCATION_CANDIDATES="${AZURE_LOCATION_CANDIDATES:-eastus eastus2 westus2 westus3 centralus southcentralus northeurope westeurope uksouth canadacentral southeastasia centralindia uaenorth}"
 IMAGE_NAME="${IMAGE_NAME:-neuroscope-mri}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
@@ -57,7 +61,11 @@ fi
 remaining_vcpus() {
   local region="$1"
   local usage_json
-  usage_json="$(az vm list-usage --location "$region" -o json 2>/dev/null || echo '[]')"
+  if command -v timeout >/dev/null 2>&1; then
+    usage_json="$(timeout "$AZURE_CLI_TIMEOUT_SECONDS" az vm list-usage --location "$region" -o json 2>/dev/null || echo '[]')"
+  else
+    usage_json="$(az vm list-usage --location "$region" -o json 2>/dev/null || echo '[]')"
+  fi
   printf '%s' "$usage_json" | "$PYTHON_BIN" -c '
 import json, sys
 try:
@@ -77,7 +85,11 @@ else:
 sku_available() {
   local region="$1"
   local sku_json
-  sku_json="$(az vm list-skus --location "$region" --resource-type virtualMachines --size "$AKS_NODE_VM_SIZE" --all -o json 2>/dev/null || echo '[]')"
+  if command -v timeout >/dev/null 2>&1; then
+    sku_json="$(timeout "$AZURE_CLI_TIMEOUT_SECONDS" az vm list-skus --location "$region" --resource-type virtualMachines --size "$AKS_NODE_VM_SIZE" --all -o json 2>/dev/null || echo '[]')"
+  else
+    sku_json="$(az vm list-skus --location "$region" --resource-type virtualMachines --size "$AKS_NODE_VM_SIZE" --all -o json 2>/dev/null || echo '[]')"
+  fi
   printf '%s' "$sku_json" | "$PYTHON_BIN" -c '
 import json
 import sys
@@ -104,6 +116,9 @@ select_azure_location() {
   fi
 
   echo "Checking Azure region quota for AKS node size ${AKS_NODE_VM_SIZE}..."
+  if [ "$CHECK_AKS_SKU_AVAILABILITY" != "true" ]; then
+    echo "Skipping slow VM SKU availability scan. Terraform/AKS will validate the selected VM size."
+  fi
   local seen=" "
   local ordered_regions=""
   for region in $AZURE_LOCATION $AZURE_LOCATION_CANDIDATES; do
@@ -116,11 +131,13 @@ select_azure_location() {
   local best_quota=0
   local best_region=""
   for region in $ordered_regions; do
-    local available
-    available="$(sku_available "$region")"
-    if [ "$available" != "yes" ]; then
-      echo "  ${region}: ${AKS_NODE_VM_SIZE} unavailable"
-      continue
+    if [ "$CHECK_AKS_SKU_AVAILABILITY" = "true" ]; then
+      local available
+      available="$(sku_available "$region")"
+      if [ "$available" != "yes" ]; then
+        echo "  ${region}: ${AKS_NODE_VM_SIZE} unavailable"
+        continue
+      fi
     fi
 
     local left
@@ -158,11 +175,147 @@ STATE_SA="${STATE_SA:-tfst${STATE_HASH}}"
 STATE_KEY="${STATE_KEY:-${PROJECT_NAME}-${ENVIRONMENT}.tfstate}"
 STATE_LOCATION="${STATE_LOCATION:-}"
 FILE_SHARE_NAME="${FILE_SHARE_NAME:-neuroscope-data}"
+FILE_SHARE_QUOTA_GB="${FILE_SHARE_QUOTA_GB:-20}"
+
+COMPACT_PROJECT="${NORMALIZED_PROJECT//-/}"
+RESOURCE_NAME_PREFIX="${COMPACT_PROJECT}${ENVIRONMENT}"
+DEFAULT_NAME_SUFFIX="${STATE_HASH:0:8}"
+
+first_matching_resource_name() {
+  local resource_type="$1"
+  local name_prefix="$2"
+
+  az resource list \
+    --resource-group "$APP_RESOURCE_GROUP" \
+    --resource-type "$resource_type" \
+    --query "[?starts_with(name, '${name_prefix}')].name | [0]" \
+    -o tsv 2>/dev/null || true
+}
+
+resource_suffix_from_name() {
+  local resource_name="$1"
+  if [[ "$resource_name" == "$RESOURCE_NAME_PREFIX"* ]]; then
+    printf '%s' "${resource_name#"$RESOURCE_NAME_PREFIX"}"
+  fi
+}
+
+EXISTING_ACR_NAME="$(first_matching_resource_name "Microsoft.ContainerRegistry/registries" "$RESOURCE_NAME_PREFIX")"
+EXISTING_STORAGE_ACCOUNT_NAME="$(first_matching_resource_name "Microsoft.Storage/storageAccounts" "$RESOURCE_NAME_PREFIX")"
+NAME_SUFFIX="${NAME_SUFFIX:-$(resource_suffix_from_name "${EXISTING_ACR_NAME:-}")}"
+NAME_SUFFIX="${NAME_SUFFIX:-$(resource_suffix_from_name "${EXISTING_STORAGE_ACCOUNT_NAME:-}")}"
+NAME_SUFFIX="${NAME_SUFFIX:-$DEFAULT_NAME_SUFFIX}"
+
+ACR_NAME="${RESOURCE_NAME_PREFIX}${NAME_SUFFIX}"
+ACR_NAME="${ACR_NAME:0:50}"
+STORAGE_ACCOUNT_NAME="${RESOURCE_NAME_PREFIX}${NAME_SUFFIX}"
+STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:0:24}"
+LOG_ANALYTICS_NAME="${APP_PREFIX}-logs"
+APP_INSIGHTS_NAME="${APP_PREFIX}-appi"
+AKS_NAME="${APP_PREFIX}-aks"
+AKS_DNS_PREFIX="${COMPACT_PROJECT}-${ENVIRONMENT}"
+
+ensure_core_azure_resources() {
+  echo "Ensuring Azure resources with Azure CLI before Terraform state import..."
+  az group create \
+    --name "$APP_RESOURCE_GROUP" \
+    --location "$AZURE_LOCATION" \
+    --tags application="NeuroScope MRI" environment="$ENVIRONMENT" managed_by="Terraform" >/dev/null
+
+  if ! az monitor log-analytics workspace show --resource-group "$APP_RESOURCE_GROUP" --workspace-name "$LOG_ANALYTICS_NAME" >/dev/null 2>&1; then
+    echo "Creating Log Analytics workspace ${LOG_ANALYTICS_NAME}..."
+    az monitor log-analytics workspace create \
+      --resource-group "$APP_RESOURCE_GROUP" \
+      --workspace-name "$LOG_ANALYTICS_NAME" \
+      --location "$AZURE_LOCATION" \
+      --sku PerGB2018 \
+      --retention-time 30 \
+      --tags application="NeuroScope MRI" environment="$ENVIRONMENT" managed_by="Terraform" >/dev/null
+  fi
+  LOG_ANALYTICS_ID="$(az monitor log-analytics workspace show --resource-group "$APP_RESOURCE_GROUP" --workspace-name "$LOG_ANALYTICS_NAME" --query id -o tsv)"
+
+  if az monitor app-insights component -h >/dev/null 2>&1; then
+    if ! az monitor app-insights component show --app "$APP_INSIGHTS_NAME" --resource-group "$APP_RESOURCE_GROUP" >/dev/null 2>&1; then
+      echo "Creating Application Insights component ${APP_INSIGHTS_NAME}..."
+      az monitor app-insights component create \
+        --app "$APP_INSIGHTS_NAME" \
+        --location "$AZURE_LOCATION" \
+        --resource-group "$APP_RESOURCE_GROUP" \
+        --application-type web \
+        --workspace "$LOG_ANALYTICS_ID" \
+        --tags application="NeuroScope MRI" environment="$ENVIRONMENT" managed_by="Terraform" >/dev/null || \
+        echo "Application Insights CLI create was not available; Terraform state reconciliation will handle it if needed."
+    fi
+  fi
+
+  if ! az acr show --name "$ACR_NAME" --resource-group "$APP_RESOURCE_GROUP" >/dev/null 2>&1; then
+    echo "Creating Azure Container Registry ${ACR_NAME}..."
+    az acr create \
+      --name "$ACR_NAME" \
+      --resource-group "$APP_RESOURCE_GROUP" \
+      --location "$AZURE_LOCATION" \
+      --sku Basic \
+      --admin-enabled false \
+      --tags application="NeuroScope MRI" environment="$ENVIRONMENT" managed_by="Terraform" >/dev/null
+  fi
+
+  if ! az storage account show --name "$STORAGE_ACCOUNT_NAME" --resource-group "$APP_RESOURCE_GROUP" >/dev/null 2>&1; then
+    echo "Creating Storage Account ${STORAGE_ACCOUNT_NAME}..."
+    az storage account create \
+      --name "$STORAGE_ACCOUNT_NAME" \
+      --resource-group "$APP_RESOURCE_GROUP" \
+      --location "$AZURE_LOCATION" \
+      --sku Standard_LRS \
+      --kind StorageV2 \
+      --min-tls-version TLS1_2 \
+      --allow-blob-public-access false \
+      --https-only true \
+      --tags application="NeuroScope MRI" environment="$ENVIRONMENT" managed_by="Terraform" >/dev/null
+  fi
+  STORAGE_ACCOUNT_KEY_FOR_SHARE="$(az storage account keys list --resource-group "$APP_RESOURCE_GROUP" --account-name "$STORAGE_ACCOUNT_NAME" --query '[0].value' -o tsv)"
+  az storage share create \
+    --name "$FILE_SHARE_NAME" \
+    --account-name "$STORAGE_ACCOUNT_NAME" \
+    --account-key "$STORAGE_ACCOUNT_KEY_FOR_SHARE" \
+    --quota "$FILE_SHARE_QUOTA_GB" >/dev/null
+
+  if ! az aks show --resource-group "$APP_RESOURCE_GROUP" --name "$AKS_NAME" >/dev/null 2>&1; then
+    echo "Creating AKS cluster ${AKS_NAME}. This can take 10-20 minutes on Azure..."
+    az aks create \
+      --resource-group "$APP_RESOURCE_GROUP" \
+      --name "$AKS_NAME" \
+      --location "$AZURE_LOCATION" \
+      --dns-name-prefix "$AKS_DNS_PREFIX" \
+      --node-count "$AKS_NODE_COUNT" \
+      --node-vm-size "$AKS_NODE_VM_SIZE" \
+      --nodepool-name system \
+      --node-osdisk-size 128 \
+      --enable-managed-identity \
+      --enable-rbac \
+      --network-plugin azure \
+      --load-balancer-sku standard \
+      --enable-oidc-issuer \
+      --enable-workload-identity \
+      --enable-addons monitoring,azure-policy \
+      --workspace-resource-id "$LOG_ANALYTICS_ID" \
+      --generate-ssh-keys \
+      --tags application="NeuroScope MRI" environment="$ENVIRONMENT" managed_by="Terraform" >/dev/null
+  fi
+
+  echo "Waiting for AKS cluster ${AKS_NAME} to be ready..."
+  az aks wait --resource-group "$APP_RESOURCE_GROUP" --name "$AKS_NAME" --created --timeout 1800
+  az aks update --resource-group "$APP_RESOURCE_GROUP" --name "$AKS_NAME" --attach-acr "$ACR_NAME" >/dev/null
+}
 
 resource_group_location() {
   local group_name="$1"
   az group show --name "$group_name" --query location -o tsv 2>/dev/null || true
 }
+
+existing_app_location="$(resource_group_location "$APP_RESOURCE_GROUP")"
+if [ -n "$existing_app_location" ]; then
+  AZURE_LOCATION="$existing_app_location"
+  echo "Using existing application resource group region: ${AZURE_LOCATION}"
+fi
 
 existing_state_location="$(resource_group_location "$STATE_RG")"
 if [ -n "$existing_state_location" ]; then
@@ -191,6 +344,8 @@ az storage container create \
   --account-name "$STATE_SA" \
   --account-key "$STATE_KEY_VALUE" >/dev/null
 
+ensure_core_azure_resources
+
 pushd "$TERRAFORM_DIR" >/dev/null
 terraform init -input=false -reconfigure \
   -backend-config="resource_group_name=${STATE_RG}" \
@@ -202,7 +357,10 @@ export TF_VAR_project_name="$PROJECT_NAME"
 export TF_VAR_environment="$ENVIRONMENT"
 export TF_VAR_location="$AZURE_LOCATION"
 export TF_VAR_node_vm_size="$AKS_NODE_VM_SIZE"
+export TF_VAR_node_count="$AKS_NODE_COUNT"
 export TF_VAR_file_share_name="$FILE_SHARE_NAME"
+export TF_VAR_file_share_quota_gb="$FILE_SHARE_QUOTA_GB"
+export TF_VAR_name_suffix="$NAME_SUFFIX"
 
 state_has() {
   terraform state show "$1" >/dev/null 2>&1
@@ -321,27 +479,19 @@ reconcile_terraform_state() {
     "$aks_id" \
     "AKS cluster ${APP_PREFIX}-aks"
 
-  COMPACT_PROJECT="${NORMALIZED_PROJECT//-/}"
-  RANDOM_NAME_PREFIX="${COMPACT_PROJECT}${ENVIRONMENT}"
-  EXISTING_ACR_NAME="$(first_matching_resource_name "Microsoft.ContainerRegistry/registries" "$RANDOM_NAME_PREFIX")"
-  if [ -n "$EXISTING_ACR_NAME" ]; then
-    import_if_exists \
-      "azurerm_container_registry.main" \
-      "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/${EXISTING_ACR_NAME}" \
-      "Container Registry ${EXISTING_ACR_NAME}"
-  fi
+  import_if_exists \
+    "azurerm_container_registry.main" \
+    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/${ACR_NAME}" \
+    "Container Registry ${ACR_NAME}"
 
-  EXISTING_STORAGE_ACCOUNT_NAME="$(first_matching_resource_name "Microsoft.Storage/storageAccounts" "$RANDOM_NAME_PREFIX")"
-  if [ -n "$EXISTING_STORAGE_ACCOUNT_NAME" ]; then
-    import_if_exists \
-      "azurerm_storage_account.main" \
-      "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}" \
-      "storage account ${EXISTING_STORAGE_ACCOUNT_NAME}"
-    import_if_exists \
-      "azurerm_storage_share.app" \
-      "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}/fileServices/default/shares/${FILE_SHARE_NAME}" \
-      "Azure Files share ${EXISTING_STORAGE_ACCOUNT_NAME}/${FILE_SHARE_NAME}"
-  fi
+  import_if_exists \
+    "azurerm_storage_account.main" \
+    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_NAME}" \
+    "storage account ${STORAGE_ACCOUNT_NAME}"
+  import_if_exists \
+    "azurerm_storage_share.app" \
+    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_NAME}/fileServices/default/shares/${FILE_SHARE_NAME}" \
+    "Azure Files share ${STORAGE_ACCOUNT_NAME}/${FILE_SHARE_NAME}"
 }
 
 terraform_apply() {
@@ -349,7 +499,11 @@ terraform_apply() {
     -var="project_name=${PROJECT_NAME}" \
     -var="environment=${ENVIRONMENT}" \
     -var="location=${AZURE_LOCATION}" \
-    -var="node_vm_size=${AKS_NODE_VM_SIZE}"
+    -var="node_vm_size=${AKS_NODE_VM_SIZE}" \
+    -var="node_count=${AKS_NODE_COUNT}" \
+    -var="file_share_name=${FILE_SHARE_NAME}" \
+    -var="file_share_quota_gb=${FILE_SHARE_QUOTA_GB}" \
+    -var="name_suffix=${NAME_SUFFIX}"
 }
 
 terraform_apply_with_recovery() {
@@ -380,16 +534,23 @@ terraform_apply_with_recovery() {
   exit 1
 }
 
-terraform_apply_with_recovery
-
-ACR_NAME="$(terraform output -raw acr_name)"
-ACR_LOGIN_SERVER="$(terraform output -raw acr_login_server)"
-AKS_NAME="$(terraform output -raw aks_name)"
-RESOURCE_GROUP="$(terraform output -raw resource_group_name)"
-STORAGE_ACCOUNT_NAME="$(terraform output -raw storage_account_name)"
-STORAGE_ACCOUNT_KEY="$(terraform output -raw storage_account_key)"
-FILE_SHARE_NAME="$(terraform output -raw file_share_name)"
-LOG_ANALYTICS_NAME="$(terraform output -raw log_analytics_workspace_name)"
+if [ "$TERRAFORM_APPLY_INFRA" = "true" ]; then
+  terraform_apply_with_recovery
+  ACR_NAME="$(terraform output -raw acr_name)"
+  ACR_LOGIN_SERVER="$(terraform output -raw acr_login_server)"
+  AKS_NAME="$(terraform output -raw aks_name)"
+  RESOURCE_GROUP="$(terraform output -raw resource_group_name)"
+  STORAGE_ACCOUNT_NAME="$(terraform output -raw storage_account_name)"
+  STORAGE_ACCOUNT_KEY="$(terraform output -raw storage_account_key)"
+  FILE_SHARE_NAME="$(terraform output -raw file_share_name)"
+  LOG_ANALYTICS_NAME="$(terraform output -raw log_analytics_workspace_name)"
+else
+  reconcile_terraform_state
+  echo "Skipping Terraform apply because TERRAFORM_APPLY_INFRA=false. Azure resources were ensured with Azure CLI and imported into Terraform state."
+  ACR_LOGIN_SERVER="$(az acr show --name "$ACR_NAME" --query loginServer -o tsv)"
+  RESOURCE_GROUP="$APP_RESOURCE_GROUP"
+  STORAGE_ACCOUNT_KEY="$(az storage account keys list --resource-group "$APP_RESOURCE_GROUP" --account-name "$STORAGE_ACCOUNT_NAME" --query '[0].value' -o tsv)"
+fi
 popd >/dev/null
 
 IMAGE_URI="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}"

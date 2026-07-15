@@ -6,7 +6,7 @@
     <title>NeuroScope MRI</title>
     <meta
       name="description"
-      content="Flask MRI review application with MONAI BraTS segmentation workflow, image and video overlays, live frame review, and Azure deployment automation."
+      content="Clean Flask MRI scanner interface that returns a thermal-style brain tumor overlay for uploaded MRI studies."
     >
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,34 +23,32 @@
           <span class="brand-mark" aria-hidden="true"></span>
           <span>
             <strong>NeuroScope MRI</strong>
-            <small>Brain tumor segmentation console</small>
+            <small>Thermal tumor overlay</small>
           </span>
         </a>
-        <div class="topbar-actions">
-          <span class="status-dot"><span></span>Azure-ready</span>
-          <a class="ghost-link" href="/metrics" target="_blank" rel="noreferrer">Metrics</a>
-        </div>
+        <span class="preview-pill">Research preview</span>
       </header>
 
-      <main class="hero-grid">
-        <section class="intake-panel" aria-label="MRI analysis controls">
-          <div class="panel-heading">
-            <p class="eyebrow">MRI Intake</p>
-            <h1>Find suspicious tumor regions from MRI studies.</h1>
-            <p class="clinical-note">
-              Research preview only. Results must be reviewed by qualified medical professionals.
+      <main class="layout">
+        <section class="scanner-card" aria-label="MRI scanner">
+          <div class="intro">
+            <p class="eyebrow">MRI Review</p>
+            <h1>Brain MRI Tumor Scan</h1>
+            <p>
+              Upload a brain MRI image, video, or volume study and receive a clean thermal-style
+              overlay highlighting suspicious tumor regions for review.
             </p>
           </div>
 
           <div class="mode-tabs" role="tablist" aria-label="Analysis mode">
             <button class="mode-tab active" type="button" data-mode="single" role="tab" aria-selected="true">
-              Image or Video
+              MRI scan
             </button>
             <button class="mode-tab" type="button" data-mode="volume" role="tab" aria-selected="false">
-              3D MRI
+              Volume MRI
             </button>
             <button class="mode-tab" type="button" data-mode="live" role="tab" aria-selected="false">
-              Live Check
+              Camera
             </button>
           </div>
 
@@ -58,13 +56,10 @@
             <label class="dropzone" id="dropzone">
               <input id="scanInput" name="scan" type="file" accept="image/*,video/*">
               <span class="dropzone-icon" aria-hidden="true"></span>
-              <strong id="singleFileName">Drop MRI image or video</strong>
+              <strong id="singleFileName">Choose MRI image or video</strong>
               <small>PNG, JPG, TIFF, MP4, MOV, AVI, MKV</small>
             </label>
-            <button class="primary-btn" type="submit">
-              <span class="btn-pulse" aria-hidden="true"></span>
-              Analyze Scan
-            </button>
+            <button class="primary-btn" type="submit">Analyze scan</button>
           </form>
 
           <form class="mode-pane volume-grid" id="volumeForm" data-pane="volume">
@@ -84,51 +79,41 @@
               <span>FLAIR</span>
               <input name="flair" type="file" accept=".nii,.gz">
             </label>
-            <button class="primary-btn span-all" type="submit">
-              <span class="btn-pulse" aria-hidden="true"></span>
-              Run 3D MONAI Segmentation
-            </button>
+            <button class="primary-btn span-all" type="submit">Run volume scan</button>
           </form>
 
           <section class="mode-pane live-pane" id="livePane" data-pane="live">
             <div class="camera-frame">
               <video id="cameraFeed" autoplay playsinline muted></video>
               <canvas id="captureCanvas" hidden></canvas>
-              <div class="camera-empty" id="cameraEmpty">Camera inactive</div>
+              <div class="camera-empty" id="cameraEmpty">Camera ready</div>
             </div>
+            <p class="camera-help" id="cameraHelp">Live camera works on HTTPS or localhost.</p>
             <div class="live-actions">
-              <button class="secondary-btn" id="startCamera" type="button">Start Camera</button>
-              <button class="primary-btn" id="captureFrame" type="button">
-                <span class="btn-pulse" aria-hidden="true"></span>
-                Analyze Frame
-              </button>
+              <button class="secondary-btn" id="startCamera" type="button">Start camera</button>
+              <button class="primary-btn" id="captureFrame" type="button">Analyze frame</button>
             </div>
           </section>
 
-          <div class="trust-row" aria-label="System safeguards">
-            <span>MONAI BraTS bundle</span>
-            <span>AKS deployment</span>
-            <span>Azure Monitor</span>
-          </div>
+          <p class="disclaimer">
+            This tool is a research aid only and is not a medical diagnosis.
+          </p>
         </section>
 
-        <section class="viewer-panel" aria-label="MRI result viewer">
-          <div class="viewer-topline">
+        <section class="result-card" aria-label="MRI result viewer">
+          <div class="result-head">
             <div>
-              <p class="eyebrow">Detection View</p>
-              <h2 id="viewerTitle">Awaiting scan</h2>
+              <p class="eyebrow">Result</p>
+              <h2 id="viewerTitle">Waiting for scan</h2>
             </div>
             <span class="model-chip" id="modelChip">Model idle</span>
           </div>
 
           <div class="scan-stage" id="scanStage">
             <canvas id="mriCanvas" width="900" height="660" aria-label="Animated MRI preview"></canvas>
-            <img id="resultImage" alt="MRI analysis overlay" hidden>
+            <img id="resultImage" alt="MRI thermal tumor overlay" hidden>
             <div class="scanline" aria-hidden="true"></div>
-            <div class="corner corner-a" aria-hidden="true"></div>
-            <div class="corner corner-b" aria-hidden="true"></div>
-            <div class="corner corner-c" aria-hidden="true"></div>
-            <div class="corner corner-d" aria-hidden="true"></div>
+            <div class="stage-glow" aria-hidden="true"></div>
           </div>
 
           <div class="metric-strip">
@@ -137,12 +122,12 @@
               <strong id="metricStatus">Ready</strong>
             </div>
             <div>
-              <small>Regions</small>
-              <strong id="metricRegions">0</strong>
+              <small>Overlay</small>
+              <strong id="metricRegions">Waiting</strong>
             </div>
             <div>
-              <small>Latency</small>
-              <strong id="metricLatency">0 ms</strong>
+              <small>Review</small>
+              <strong id="metricLatency">Pending</strong>
             </div>
           </div>
 
@@ -150,32 +135,13 @@
             <article class="finding-card empty">
               <span></span>
               <div>
-                <strong>Clinical workflow ready</strong>
-                <p>Upload a scan, run the 3D MRI model, or check a live frame.</p>
+                <strong>No scan loaded</strong>
+                <p>The thermal overlay will appear here after analysis.</p>
               </div>
             </article>
           </div>
         </section>
       </main>
-
-      <section class="monitor-band" aria-label="Azure monitoring summary">
-        <div>
-          <small>Deployment</small>
-          <strong>GitHub Actions + Jenkinsfile</strong>
-        </div>
-        <div>
-          <small>Infrastructure</small>
-          <strong>AKS, ACR, Log Analytics</strong>
-        </div>
-        <div>
-          <small>Observability</small>
-          <strong>Health probes + Prometheus metrics</strong>
-        </div>
-        <div>
-          <small>Model source</small>
-          <strong>MONAI Model Zoo</strong>
-        </div>
-      </section>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>

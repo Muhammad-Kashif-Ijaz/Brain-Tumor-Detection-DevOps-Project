@@ -16,6 +16,11 @@ variable "location" {
   default     = "eastus"
 }
 
+variable "name_suffix" {
+  description = "Stable lowercase suffix used for globally unique Azure resource names."
+  type        = string
+}
+
 variable "node_count" {
   description = "Initial AKS node count."
   type        = number

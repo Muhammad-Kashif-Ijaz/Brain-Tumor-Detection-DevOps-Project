@@ -269,7 +269,7 @@ class BrainTumorInference:
                 mode="3d-mri",
                 input_type="nifti",
                 model_name="MONAI brats_mri_segmentation",
-                message="3D tumor segmentation completed. Review the overlay with a qualified clinician.",
+                message="Volume tumor segmentation completed. Review the overlay with a qualified clinician.",
                 inference_ms=elapsed,
                 model_loaded=True,
                 overlay_filename=overlay_filename,
@@ -351,20 +351,10 @@ class BrainTumorInference:
         mask = seg[:, :, z_index]
         image = self._normalize_to_uint8(image)
         rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        overlay = rgb.copy()
-
-        color_map = {
-            1: np.array([255, 70, 70], dtype=np.uint8),
-            2: np.array([255, 180, 40], dtype=np.uint8),
-            4: np.array([40, 190, 255], dtype=np.uint8),
-        }
-        for label, color in color_map.items():
-            region = mask == label
-            overlay[region] = (0.55 * overlay[region] + 0.45 * color).astype(np.uint8)
-
+        overlay = self._thermal_overlay(rgb, mask > 0)
         contours_mask = (mask > 0).astype(np.uint8) * 255
         contours, _ = cv2.findContours(contours_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, (255, 255, 255), 1)
+        cv2.drawContours(overlay, contours, -1, (255, 229, 180), 2)
 
         findings = []
         for contour in contours:
@@ -421,21 +411,7 @@ class BrainTumorInference:
             suspicious = cv2.morphologyEx(dark_halo.astype(np.uint8), cv2.MORPH_OPEN, kernel, iterations=1)
             findings = self._components_to_findings(suspicious, gray.shape, label="possible abnormal low-intensity region")
 
-        overlay = resized.copy()
-        heat = np.zeros_like(gray, dtype=np.uint8)
-        heat[suspicious > 0] = 220
-        heat = cv2.GaussianBlur(heat, (21, 21), 0)
-        colored = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
-        colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
-        alpha = np.clip(heat.astype(np.float32) / 255.0, 0.0, 0.45)[:, :, None]
-        overlay = (overlay * (1 - alpha) + colored * alpha).astype(np.uint8)
-
-        contours, _ = cv2.findContours((suspicious > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for contour in contours:
-            if cv2.contourArea(contour) < 12:
-                continue
-            x, y, w, h = cv2.boundingRect(contour)
-            cv2.rectangle(overlay, (x, y), (x + w, y + h), (255, 235, 80), 2)
+        overlay = self._thermal_overlay(resized, suspicious > 0)
 
         if scale != 1.0:
             findings = [
@@ -451,6 +427,36 @@ class BrainTumorInference:
                 for finding in findings
             ]
         return overlay, findings[:8]
+
+    def _thermal_overlay(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        base = clahe.apply(gray)
+        base_rgb = cv2.cvtColor(base, cv2.COLOR_GRAY2RGB)
+
+        mask_uint = (mask > 0).astype(np.uint8)
+        if mask_uint.sum() == 0:
+            return base_rgb
+
+        smallest_side = max(1, min(mask_uint.shape[:2]))
+        kernel_size = max(21, int(smallest_side * 0.055))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        heat = (mask_uint * 255).astype(np.uint8)
+        heat = cv2.GaussianBlur(heat, (kernel_size, kernel_size), 0)
+        if int(heat.max()) > 0:
+            heat = cv2.normalize(heat, None, 0, 255, cv2.NORM_MINMAX)
+
+        color_map = getattr(cv2, "COLORMAP_INFERNO", cv2.COLORMAP_JET)
+        thermal = cv2.applyColorMap(heat, color_map)
+        thermal = cv2.cvtColor(thermal, cv2.COLOR_BGR2RGB)
+        alpha = np.clip(heat.astype(np.float32) / 255.0, 0.0, 0.72)[:, :, None]
+        overlay = (base_rgb * (1 - alpha) + thermal * alpha).astype(np.uint8)
+
+        contours, _ = cv2.findContours(mask_uint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, (255, 232, 188), 2)
+        return overlay
 
     def _components_to_findings(self, mask: np.ndarray, shape: Tuple[int, int], label: str = "possible tumor region") -> List[Finding]:
         count, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
