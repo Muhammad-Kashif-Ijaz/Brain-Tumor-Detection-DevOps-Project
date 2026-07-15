@@ -157,6 +157,7 @@ STATE_RG="${STATE_RG:-${PROJECT_NAME}-${ENVIRONMENT}-tfstate-rg}"
 STATE_SA="${STATE_SA:-tfst${STATE_HASH}}"
 STATE_KEY="${STATE_KEY:-${PROJECT_NAME}-${ENVIRONMENT}.tfstate}"
 STATE_LOCATION="${STATE_LOCATION:-}"
+FILE_SHARE_NAME="${FILE_SHARE_NAME:-neuroscope-data}"
 
 resource_group_location() {
   local group_name="$1"
@@ -201,6 +202,7 @@ export TF_VAR_project_name="$PROJECT_NAME"
 export TF_VAR_environment="$ENVIRONMENT"
 export TF_VAR_location="$AZURE_LOCATION"
 export TF_VAR_node_vm_size="$AKS_NODE_VM_SIZE"
+export TF_VAR_file_share_name="$FILE_SHARE_NAME"
 
 state_has() {
   terraform state show "$1" >/dev/null 2>&1
@@ -238,6 +240,17 @@ import_resource_group_if_exists() {
   fi
 }
 
+first_matching_resource_name() {
+  local resource_type="$1"
+  local name_prefix="$2"
+
+  az resource list \
+    --resource-group "$APP_RESOURCE_GROUP" \
+    --resource-type "$resource_type" \
+    --query "[?starts_with(name, '${name_prefix}')].name | [0]" \
+    -o tsv 2>/dev/null || true
+}
+
 echo "Reconciling Terraform state with any resources from earlier failed runs..."
 import_resource_group_if_exists \
   "azurerm_resource_group.main" \
@@ -254,6 +267,28 @@ import_if_exists \
   "azurerm_kubernetes_cluster.main" \
   "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerService/managedClusters/${APP_PREFIX}-aks" \
   "AKS cluster ${APP_PREFIX}-aks"
+
+COMPACT_PROJECT="${NORMALIZED_PROJECT//-/}"
+RANDOM_NAME_PREFIX="${COMPACT_PROJECT}${ENVIRONMENT}"
+EXISTING_ACR_NAME="$(first_matching_resource_name "Microsoft.ContainerRegistry/registries" "$RANDOM_NAME_PREFIX")"
+if [ -n "$EXISTING_ACR_NAME" ]; then
+  import_if_exists \
+    "azurerm_container_registry.main" \
+    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/${EXISTING_ACR_NAME}" \
+    "Container Registry ${EXISTING_ACR_NAME}"
+fi
+
+EXISTING_STORAGE_ACCOUNT_NAME="$(first_matching_resource_name "Microsoft.Storage/storageAccounts" "$RANDOM_NAME_PREFIX")"
+if [ -n "$EXISTING_STORAGE_ACCOUNT_NAME" ]; then
+  import_if_exists \
+    "azurerm_storage_account.main" \
+    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}" \
+    "storage account ${EXISTING_STORAGE_ACCOUNT_NAME}"
+  import_if_exists \
+    "azurerm_storage_share.app" \
+    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}/fileServices/default/shares/${FILE_SHARE_NAME}" \
+    "Azure Files share ${EXISTING_STORAGE_ACCOUNT_NAME}/${FILE_SHARE_NAME}"
+fi
 
 terraform_apply() {
   terraform apply -input=false -auto-approve \
