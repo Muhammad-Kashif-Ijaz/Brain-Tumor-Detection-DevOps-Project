@@ -21,16 +21,6 @@ def index():
     return render_template("index.html", asset_version=current_app.config["ASSET_VERSION"])
 
 
-@bp.get("/model")
-def model_page():
-    return render_template("model.html", asset_version=current_app.config["ASSET_VERSION"])
-
-
-@bp.get("/workflow")
-def workflow_page():
-    return render_template("workflow.html", asset_version=current_app.config["ASSET_VERSION"])
-
-
 @bp.get("/healthz")
 def healthz():
     return jsonify({"status": "ok"})

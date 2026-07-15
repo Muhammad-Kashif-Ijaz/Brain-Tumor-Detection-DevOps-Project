@@ -393,28 +393,73 @@ class BrainTumorInference:
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
         brain_mask = gray > max(8, np.percentile(gray, 18))
-        brain_mask = self._largest_component(brain_mask.astype(np.uint8))
+        brain_mask = cv2.morphologyEx(brain_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=1)
+        brain_mask = self._largest_component(brain_mask)
         if brain_mask.sum() == 0:
             brain_mask = np.ones_like(gray, dtype=np.uint8)
 
-        brain_pixels = gray[brain_mask > 0]
-        high_threshold = np.percentile(brain_pixels, 96.5) if brain_pixels.size else 245
-        low_threshold = np.percentile(brain_pixels, 4) if brain_pixels.size else 5
-        bright = (gray >= high_threshold) & (brain_mask > 0)
-        dark_halo = (gray <= low_threshold) & (brain_mask > 0)
+        smallest_side = max(1, min(gray.shape[:2]))
+        erosion_size = max(9, int(smallest_side * 0.028))
+        if erosion_size % 2 == 0:
+            erosion_size += 1
+        inner_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_size, erosion_size))
+        inner_mask = cv2.erode(brain_mask, inner_kernel, iterations=1)
+        if inner_mask.sum() < brain_mask.sum() * 0.18:
+            inner_mask = brain_mask
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        suspicious = cv2.morphologyEx(bright.astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=2)
+        brain_pixels = gray[inner_mask > 0].astype(np.float32)
+        if brain_pixels.size:
+            q1, median, q3 = np.percentile(brain_pixels, [25, 50, 75])
+            robust_scale = max(8.0, float(q3 - q1))
+            high_threshold = float(np.percentile(brain_pixels, 93))
+            low_threshold = float(np.percentile(brain_pixels, 6))
+        else:
+            median = float(np.median(gray))
+            robust_scale = 32.0
+            high_threshold = 230.0
+            low_threshold = 25.0
+
+        gray_float = gray.astype(np.float32)
+        sigma = max(7.0, smallest_side * 0.038)
+        local_mean = cv2.GaussianBlur(gray_float, (0, 0), sigma)
+        intensity_deviation = np.abs(gray_float - median) / robust_scale
+        local_deviation = np.abs(gray_float - local_mean)
+
+        review_area = inner_mask > 0
+        if np.any(review_area):
+            intensity_scale = max(1.0, float(np.percentile(intensity_deviation[review_area], 98)))
+            local_scale = max(1.0, float(np.percentile(local_deviation[review_area], 98)))
+        else:
+            intensity_scale = 1.0
+            local_scale = 1.0
+
+        anomaly_score = 0.66 * np.clip(intensity_deviation / intensity_scale, 0, 1)
+        anomaly_score += 0.34 * np.clip(local_deviation / local_scale, 0, 1)
+        anomaly_score[~review_area] = 0
+
+        if np.any(review_area):
+            score_threshold = max(0.56, float(np.percentile(anomaly_score[review_area], 96.2)))
+        else:
+            score_threshold = 0.7
+
+        bright_focus = (gray_float >= high_threshold) & (anomaly_score >= 0.34)
+        dark_focus = (gray_float <= low_threshold) & (anomaly_score >= 0.44)
+        suspicious = ((anomaly_score >= score_threshold) | bright_focus | dark_focus) & review_area
+
+        kernel_size = max(5, int(smallest_side * 0.018))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        suspicious = cv2.morphologyEx(suspicious.astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=2)
         suspicious = cv2.morphologyEx(suspicious, cv2.MORPH_OPEN, kernel, iterations=1)
 
         findings = self._components_to_findings(suspicious, gray.shape)
-        if not findings:
-            suspicious = cv2.morphologyEx(dark_halo.astype(np.uint8), cv2.MORPH_OPEN, kernel, iterations=1)
-            findings = self._components_to_findings(suspicious, gray.shape, label="possible abnormal low-intensity region")
 
         if not findings:
             suspicious, fallback_finding = self._fallback_review_focus(gray, brain_mask)
             findings = [fallback_finding]
+        else:
+            suspicious = self._findings_to_focus_mask(findings, gray.shape, brain_mask)
 
         overlay = self._thermal_overlay(resized, suspicious > 0)
 
@@ -432,6 +477,17 @@ class BrainTumorInference:
                 for finding in findings
             ]
         return overlay, findings[:8]
+
+    def _findings_to_focus_mask(self, findings: List[Finding], shape: Tuple[int, int], brain_mask: np.ndarray) -> np.ndarray:
+        height, width = shape
+        focus_mask = np.zeros((height, width), dtype=np.uint8)
+        for finding in findings[:8]:
+            center_x = int(finding.x + finding.width / 2)
+            center_y = int(finding.y + finding.height / 2)
+            radius_x = max(16, int(finding.width * 0.68))
+            radius_y = max(16, int(finding.height * 0.68))
+            cv2.ellipse(focus_mask, (center_x, center_y), (radius_x, radius_y), 0, 0, 360, 1, -1)
+        return (focus_mask & (brain_mask > 0).astype(np.uint8)).astype(np.uint8)
 
     def _fallback_review_focus(self, gray: np.ndarray, brain_mask: np.ndarray) -> Tuple[np.ndarray, Finding]:
         height, width = gray.shape[:2]

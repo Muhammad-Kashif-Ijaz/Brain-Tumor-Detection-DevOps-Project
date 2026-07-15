@@ -20,7 +20,7 @@ const resultImage = document.getElementById("resultImage");
 const resultStatus = document.getElementById("resultStatus");
 const resultNarrative = document.getElementById("resultNarrative");
 const viewerTitle = document.getElementById("viewerTitle");
-const modelChip = document.getElementById("modelChip");
+const scanChip = document.getElementById("scanChip");
 const metricStatus = document.getElementById("metricStatus");
 const metricRegions = document.getElementById("metricRegions");
 const metricLatency = document.getElementById("metricLatency");
@@ -95,7 +95,7 @@ function setBusy(isBusy, label = "Analyzing") {
     metricLatency.textContent = "Processing";
     viewerTitle.textContent = "Scanning study";
     resultStatus.textContent = "Generating map";
-    modelChip.textContent = "Thermal scan running";
+    scanChip.textContent = "Thermal scan running";
     resultNarrative.textContent = "The scan is being reviewed and the thermal tumor map is being prepared.";
   }
 }
@@ -106,7 +106,7 @@ function resetResultPreview() {
   mriCanvas.hidden = false;
   resultStatus.textContent = "Pending review";
   viewerTitle.textContent = "Waiting for scan";
-  modelChip.textContent = "Scanner ready";
+  scanChip.textContent = "Scanner ready";
   metricStatus.textContent = "Ready";
   metricRegions.textContent = "Overlay waiting";
   metricLatency.textContent = "Review pending";
@@ -200,7 +200,7 @@ function renderResult(data) {
   metricStatus.textContent = ok ? "Complete" : "Review needed";
   metricRegions.textContent = findings.length ? "Thermal focus marked" : "No focus marked";
   metricLatency.textContent = findings.length ? "Doctor review advised" : "Continue review";
-  modelChip.textContent = ok ? "Thermal review ready" : "Review needed";
+  scanChip.textContent = ok ? "Thermal review ready" : "Review needed";
   viewerTitle.textContent = ok ? "Thermal map ready" : "Review needed";
   resultStatus.textContent = ok ? "Thermal image ready" : "Check result";
 
@@ -237,7 +237,7 @@ function renderError(message) {
   metricRegions.textContent = "Not available";
   metricLatency.textContent = "Try again";
   viewerTitle.textContent = "Analysis stopped";
-  modelChip.textContent = "Check input";
+  scanChip.textContent = "Check input";
   resultStatus.textContent = "Image unavailable";
   resultNarrative.textContent = message;
   resultFeed.innerHTML = findingCard("Analysis failed", message, true);
