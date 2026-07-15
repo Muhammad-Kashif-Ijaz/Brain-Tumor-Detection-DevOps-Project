@@ -424,34 +424,39 @@ class BrainTumorInference:
         local_mean = cv2.GaussianBlur(gray_float, (0, 0), sigma)
         intensity_deviation = np.abs(gray_float - median) / robust_scale
         local_deviation = np.abs(gray_float - local_mean)
+        symmetry_deviation = np.abs(gray_float - np.fliplr(gray_float))
 
         review_area = inner_mask > 0
+        paired_area = review_area & (np.fliplr(brain_mask) > 0)
         if np.any(review_area):
             intensity_scale = max(1.0, float(np.percentile(intensity_deviation[review_area], 98)))
             local_scale = max(1.0, float(np.percentile(local_deviation[review_area], 98)))
         else:
             intensity_scale = 1.0
             local_scale = 1.0
+        symmetry_scale = max(1.0, float(np.percentile(symmetry_deviation[paired_area], 98))) if np.any(paired_area) else 1.0
 
-        anomaly_score = 0.66 * np.clip(intensity_deviation / intensity_scale, 0, 1)
+        anomaly_score = 0.48 * np.clip(intensity_deviation / intensity_scale, 0, 1)
         anomaly_score += 0.34 * np.clip(local_deviation / local_scale, 0, 1)
+        anomaly_score += 0.18 * np.clip(symmetry_deviation / symmetry_scale, 0, 1)
         anomaly_score[~review_area] = 0
 
         if np.any(review_area):
-            score_threshold = max(0.56, float(np.percentile(anomaly_score[review_area], 96.2)))
+            score_threshold = max(0.50, float(np.percentile(anomaly_score[review_area], 94.6)))
         else:
             score_threshold = 0.7
 
-        bright_focus = (gray_float >= high_threshold) & (anomaly_score >= 0.34)
-        dark_focus = (gray_float <= low_threshold) & (anomaly_score >= 0.44)
+        bright_focus = (gray_float >= high_threshold) & (anomaly_score >= 0.28)
+        dark_focus = (gray_float <= low_threshold) & (anomaly_score >= 0.36)
         suspicious = ((anomaly_score >= score_threshold) | bright_focus | dark_focus) & review_area
 
-        kernel_size = max(5, int(smallest_side * 0.018))
+        kernel_size = max(5, int(smallest_side * 0.015))
         if kernel_size % 2 == 0:
             kernel_size += 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         suspicious = cv2.morphologyEx(suspicious.astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=2)
         suspicious = cv2.morphologyEx(suspicious, cv2.MORPH_OPEN, kernel, iterations=1)
+        suspicious = cv2.dilate(suspicious, kernel, iterations=1)
 
         findings = self._components_to_findings(suspicious, gray.shape)
 
@@ -484,8 +489,8 @@ class BrainTumorInference:
         for finding in findings[:8]:
             center_x = int(finding.x + finding.width / 2)
             center_y = int(finding.y + finding.height / 2)
-            radius_x = max(16, int(finding.width * 0.68))
-            radius_y = max(16, int(finding.height * 0.68))
+            radius_x = max(22, int(finding.width * 0.9))
+            radius_y = max(22, int(finding.height * 0.9))
             cv2.ellipse(focus_mask, (center_x, center_y), (radius_x, radius_y), 0, 0, 360, 1, -1)
         return (focus_mask & (brain_mask > 0).astype(np.uint8)).astype(np.uint8)
 
@@ -554,19 +559,23 @@ class BrainTumorInference:
         if int(heat.max()) > 0:
             heat = cv2.normalize(heat, None, 0, 255, cv2.NORM_MINMAX)
 
-        color_map = getattr(cv2, "COLORMAP_INFERNO", cv2.COLORMAP_JET)
+        color_map = getattr(cv2, "COLORMAP_TURBO", getattr(cv2, "COLORMAP_INFERNO", cv2.COLORMAP_JET))
         thermal = cv2.applyColorMap(heat, color_map)
         thermal = cv2.cvtColor(thermal, cv2.COLOR_BGR2RGB)
-        alpha = np.clip(heat.astype(np.float32) / 255.0, 0.0, 0.72)[:, :, None]
+        alpha = np.clip(heat.astype(np.float32) / 255.0, 0.0, 0.88)[:, :, None]
         overlay = (base_rgb * (1 - alpha) + thermal * alpha).astype(np.uint8)
 
         contours, _ = cv2.findContours(mask_uint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, (255, 232, 188), 2)
+        glow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        glow = cv2.dilate(mask_uint, glow_kernel, iterations=1)
+        glow_contours, _ = cv2.findContours(glow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, glow_contours, -1, (255, 132, 54), 5)
+        cv2.drawContours(overlay, contours, -1, (255, 244, 210), 2)
         for contour in contours:
             if cv2.contourArea(contour) < 12:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
-            label = "Possible tumor"
+            label = "Possible tumor region"
             label_y = max(22, y - 8)
             text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
             cv2.rectangle(
@@ -577,6 +586,10 @@ class BrainTumorInference:
                 -1,
             )
             cv2.putText(overlay, label, (x + 6, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 236, 202), 2, cv2.LINE_AA)
+            cv2.line(overlay, (x, y), (x + min(34, w), y), (255, 244, 210), 2)
+            cv2.line(overlay, (x, y), (x, y + min(34, h)), (255, 244, 210), 2)
+            cv2.line(overlay, (x + w, y + h), (x + max(0, w - 34), y + h), (255, 244, 210), 2)
+            cv2.line(overlay, (x + w, y + h), (x + w, y + max(0, h - 34)), (255, 244, 210), 2)
         return overlay
 
     def _components_to_findings(self, mask: np.ndarray, shape: Tuple[int, int], label: str = "possible tumor region") -> List[Finding]:
@@ -586,10 +599,10 @@ class BrainTumorInference:
         for index in range(1, count):
             x, y, w, h, area = stats[index]
             area_ratio = float(area) / image_area
-            if area_ratio < 0.00035 or area_ratio > 0.18:
+            if area_ratio < 0.00012 or area_ratio > 0.22:
                 continue
             compactness = min(1.0, area / max(1.0, float(w * h)))
-            confidence = max(0.15, min(0.88, 0.28 + area_ratio * 12 + compactness * 0.35))
+            confidence = max(0.2, min(0.9, 0.34 + area_ratio * 11 + compactness * 0.34))
             region_name = self._scan_region_name(int(x + w / 2), int(y + h / 2), shape[1], shape[0])
             findings.append(Finding(f"{label} in the {region_name}", round(confidence, 3), int(x), int(y), int(w), int(h), area_ratio))
         findings.sort(key=lambda item: item.confidence * item.area_ratio, reverse=True)

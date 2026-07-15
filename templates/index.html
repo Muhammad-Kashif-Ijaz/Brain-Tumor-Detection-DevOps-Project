@@ -6,7 +6,7 @@
     <title>NeuroScope MRI</title>
     <meta
       name="description"
-      content="Enterprise brain MRI review workstation with original and thermal tumor overlay comparison."
+      content="Brain MRI review workstation with original scan and thermal tumor region overlay."
     >
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,24 +17,24 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v={{ asset_version }}">
   </head>
   <body>
-    <div class="workstation-shell">
-      <aside class="case-rail" aria-label="Case workspace">
+    <div class="app-frame">
+      <aside class="command-rail" aria-label="MRI review workspace">
         <a class="brand" href="/" aria-label="NeuroScope MRI home">
           <span class="brand-mark" aria-hidden="true"></span>
           <span>
             <strong>NeuroScope MRI</strong>
-            <small>Radiology review workstation</small>
+            <small>Brain scan review suite</small>
           </span>
         </a>
 
-        <div class="case-card current">
+        <section class="rail-block active-case" aria-label="Active case">
           <small>Active Study</small>
-          <strong>Brain MRI Review</strong>
+          <strong>Brain MRI Tumor Review</strong>
           <span id="metricStatus">Ready</span>
-        </div>
+        </section>
 
-        <div class="rail-section">
-          <p class="rail-title">Scan Modes</p>
+        <section class="rail-block" aria-label="Scan mode">
+          <p class="rail-title">Scan Mode</p>
           <div class="mode-tabs" role="tablist" aria-label="Analysis mode">
             <button class="mode-tab active" type="button" data-mode="single" role="tab" aria-selected="true">
               Image
@@ -46,38 +46,67 @@
               Camera
             </button>
           </div>
-        </div>
+        </section>
 
-        <div class="rail-section">
+        <section class="rail-block" aria-label="Review state">
           <p class="rail-title">Review State</p>
-          <div class="rail-metric">
+          <div class="rail-row">
             <span>Overlay</span>
             <strong id="metricRegions">Waiting</strong>
           </div>
-          <div class="rail-metric">
-            <span>Clinical action</span>
+          <div class="rail-row">
+            <span>Action</span>
             <strong id="metricLatency">Pending</strong>
           </div>
-        </div>
+          <div class="rail-row">
+            <span>Queue</span>
+            <strong>Open</strong>
+          </div>
+        </section>
 
-        <div class="rail-note">
-          <strong>Important</strong>
-          <p>This system supports review. Final interpretation must be made by qualified clinicians.</p>
-        </div>
+        <section class="rail-block case-list" aria-label="Case workspace">
+          <p class="rail-title">Workspace</p>
+          <article>
+            <span></span>
+            <div>
+              <strong>Original Scan</strong>
+              <small id="sourceStatus">No scan loaded</small>
+            </div>
+          </article>
+          <article>
+            <span></span>
+            <div>
+              <strong>Thermal Result</strong>
+              <small id="resultStatus">Pending thermal map</small>
+            </div>
+          </article>
+          <article>
+            <span></span>
+            <div>
+              <strong>Finding Summary</strong>
+              <small>Awaiting review</small>
+            </div>
+          </article>
+        </section>
+
+        <section class="rail-note">
+          <strong>Clinical Safety</strong>
+          <p>Use this as a review aid only. Final interpretation belongs to qualified clinicians.</p>
+        </section>
       </aside>
 
-      <main class="console">
-        <header class="console-header">
-          <div>
-            <p class="eyebrow">Enterprise MRI Workstation</p>
-            <h1>Brain tumor scan review</h1>
+      <main class="review-suite">
+        <header class="suite-header">
+          <div class="suite-title">
+            <p class="eyebrow">MRI Reading Room</p>
+            <h1>Brain tumor thermal review</h1>
             <p>
-              Compare the uploaded MRI against a thermal review map. Possible tumor areas are
-              highlighted on the image and summarized in plain scan-location language.
+              Upload an MRI image, volume set, video frame, or live capture. The returned result
+              shows the original scan beside a thermal map with possible tumor regions marked.
             </p>
           </div>
-          <div class="processing-card">
-            <span class="processing-ring" aria-hidden="true"></span>
+          <div class="scan-state">
+            <span class="scan-ring" aria-hidden="true"></span>
             <div>
               <small id="scanChip">Scanner ready</small>
               <strong id="viewerTitle">Waiting for scan</strong>
@@ -85,14 +114,19 @@
           </div>
         </header>
 
-        <section class="review-grid">
-          <section class="intake-stack" aria-label="MRI scan controls">
+        <section class="diagnostic-layout">
+          <section class="intake-panel" aria-label="MRI acquisition controls">
+            <div class="panel-head">
+              <small>Acquisition</small>
+              <strong>Load study</strong>
+            </div>
+
             <form class="mode-pane active" id="singleForm" data-pane="single">
               <label class="upload-console" id="dropzone">
                 <input id="scanInput" name="scan" type="file" accept="image/*,video/*">
-                <span class="upload-icon" aria-hidden="true"></span>
-                <strong id="singleFileName">Load MRI image or video</strong>
-                <small>PNG, JPG, TIFF, MP4, MOV, AVI, MKV</small>
+                <span class="upload-visual" aria-hidden="true"></span>
+                <strong id="singleFileName">Drop or choose MRI image</strong>
+                <small>Images and videos are reviewed with thermal overlay output.</small>
               </label>
               <button class="primary-btn" type="submit">Analyze study</button>
             </form>
@@ -130,36 +164,49 @@
               </div>
             </section>
 
-            <div class="status-panel" aria-label="Review status">
-              <div>
+            <div class="readiness-stack" aria-label="Study readiness">
+              <article>
                 <span></span>
-                <strong>Source image accepted</strong>
-              </div>
-              <div>
+                <div>
+                  <strong>Source quality</strong>
+                  <small>Prepared for review</small>
+                </div>
+              </article>
+              <article>
                 <span></span>
-                <strong>Thermal comparison ready</strong>
-              </div>
-              <div>
+                <div>
+                  <strong>Thermal map</strong>
+                  <small>Returned as highlighted image</small>
+                </div>
+              </article>
+              <article>
                 <span></span>
-                <strong>Clinician review required</strong>
-              </div>
+                <div>
+                  <strong>Clinical note</strong>
+                  <small>Location text after analysis</small>
+                </div>
+              </article>
             </div>
           </section>
 
-          <section class="viewer-workspace" aria-label="MRI visual review">
+          <section class="viewer-panel" aria-label="MRI visual review">
             <div class="viewer-toolbar">
               <div>
-                <small>Viewer</small>
-                <strong>Original and thermal comparison</strong>
+                <small>Diagnostic Viewer</small>
+                <strong>Original and thermal tumor map</strong>
               </div>
-              <span id="resultStatus">Pending thermal map</span>
+              <div class="viewer-actions" aria-hidden="true">
+                <span>Axial</span>
+                <span>Tumor Map</span>
+                <span>Review</span>
+              </div>
             </div>
 
             <div class="comparison-grid">
               <article class="scan-card original-card">
                 <div class="scan-card-head">
                   <strong>Original MRI</strong>
-                  <span id="sourceStatus">No scan loaded</span>
+                  <span>Input viewport</span>
                 </div>
                 <div class="scan-stage source-stage">
                   <img id="sourceImage" alt="Original uploaded MRI scan" hidden>
@@ -172,36 +219,45 @@
 
               <article class="scan-card thermal-card">
                 <div class="scan-card-head">
-                  <strong>Thermal overlay</strong>
-                  <span>Highlighted result</span>
+                  <strong>Thermal tumor map</strong>
+                  <span>Highlighted output</span>
                 </div>
                 <div class="scan-stage thermal-stage">
-                  <canvas id="mriCanvas" width="900" height="660" aria-label="Animated MRI preview"></canvas>
+                  <canvas id="mriCanvas" width="1000" height="740" aria-label="Animated MRI preview"></canvas>
                   <img id="resultImage" alt="MRI thermal tumor overlay" hidden>
                   <div class="scanline" aria-hidden="true"></div>
                 </div>
               </article>
             </div>
+
+            <div class="viewer-footer" aria-label="Viewer status">
+              <article>
+                <small>Source</small>
+                <strong>Loaded image retained</strong>
+              </article>
+              <article>
+                <small>Overlay</small>
+                <strong>Thermal regions marked</strong>
+              </article>
+              <article>
+                <small>Reading</small>
+                <strong>Clinician validation required</strong>
+              </article>
+            </div>
           </section>
 
-          <aside class="findings-panel" aria-label="Review findings">
-            <div class="summary-block">
-              <p class="eyebrow">Finding Summary</p>
+          <aside class="interpretation-panel" aria-label="Review findings">
+            <div class="panel-head">
+              <small>Interpretation</small>
+              <strong>Finding summary</strong>
+            </div>
+
+            <section class="summary-block">
+              <p class="eyebrow">Result Narrative</p>
               <strong id="resultNarrative">Load a scan to begin review.</strong>
-            </div>
+            </section>
 
-            <div class="confidence-band" aria-label="System output state">
-              <div>
-                <small>Thermal map</small>
-                <strong>Standby</strong>
-              </div>
-              <div>
-                <small>Review queue</small>
-                <strong>Open</strong>
-              </div>
-            </div>
-
-            <div class="result-feed" id="resultFeed">
+            <section class="result-feed" id="resultFeed">
               <article class="finding-card empty">
                 <span></span>
                 <div>
@@ -209,13 +265,46 @@
                   <p>Possible tumor locations will appear here after analysis.</p>
                 </div>
               </article>
-            </div>
+            </section>
 
-            <div class="review-checklist">
-              <strong>Review checklist</strong>
-              <p>Confirm source quality, compare thermal map, and validate all marked regions clinically.</p>
-            </div>
+            <section class="review-board" aria-label="Clinical review board">
+              <article>
+                <small>Thermal boundary</small>
+                <strong id="boardBoundary">Pending</strong>
+              </article>
+              <article>
+                <small>Location text</small>
+                <strong id="boardLocation">Pending</strong>
+              </article>
+              <article>
+                <small>Case state</small>
+                <strong id="boardState">Open review</strong>
+              </article>
+            </section>
           </aside>
+        </section>
+
+        <section class="operations-grid" aria-label="Review operations">
+          <article class="ops-card quality-card">
+            <div>
+              <small>Scan Quality</small>
+              <strong>Image contrast and focus are checked before the thermal map is shown.</strong>
+            </div>
+            <span></span>
+          </article>
+          <article class="ops-card timeline-card">
+            <small>Review Timeline</small>
+            <div class="timeline">
+              <span>Load</span>
+              <span>Map</span>
+              <span>Compare</span>
+              <span>Validate</span>
+            </div>
+          </article>
+          <article class="ops-card note-card">
+            <small>Radiology Note</small>
+            <strong>Every highlighted region should be reviewed against the original MRI.</strong>
+          </article>
         </section>
       </main>
     </div>

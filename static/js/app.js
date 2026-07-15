@@ -24,6 +24,9 @@ const scanChip = document.getElementById("scanChip");
 const metricStatus = document.getElementById("metricStatus");
 const metricRegions = document.getElementById("metricRegions");
 const metricLatency = document.getElementById("metricLatency");
+const boardBoundary = document.getElementById("boardBoundary");
+const boardLocation = document.getElementById("boardLocation");
+const boardState = document.getElementById("boardState");
 const resultFeed = document.getElementById("resultFeed");
 const toast = document.getElementById("toast");
 const cameraFeed = document.getElementById("cameraFeed");
@@ -97,6 +100,9 @@ function setBusy(isBusy, label = "Analyzing") {
     resultStatus.textContent = "Generating map";
     scanChip.textContent = "Thermal scan running";
     resultNarrative.textContent = "The scan is being reviewed and the thermal tumor map is being prepared.";
+    boardBoundary.textContent = "Mapping";
+    boardLocation.textContent = "Reviewing";
+    boardState.textContent = "Processing";
   }
 }
 
@@ -111,7 +117,10 @@ function resetResultPreview() {
   metricRegions.textContent = "Overlay waiting";
   metricLatency.textContent = "Review pending";
   resultNarrative.textContent = "Upload a scan to generate a side-by-side thermal review.";
-  resultFeed.innerHTML = findingCard("No scan loaded", "Possible tumor locations will be listed here after analysis.", true);
+  boardBoundary.textContent = "Pending";
+  boardLocation.textContent = "Pending";
+  boardState.textContent = "Open review";
+  resultFeed.innerHTML = findingCard("No scan loaded", "Possible tumor locations will appear here after analysis.", true);
 }
 
 function showSourceImage(url, statusText) {
@@ -203,6 +212,9 @@ function renderResult(data) {
   scanChip.textContent = ok ? "Thermal review ready" : "Review needed";
   viewerTitle.textContent = ok ? "Thermal map ready" : "Review needed";
   resultStatus.textContent = ok ? "Thermal image ready" : "Check result";
+  boardBoundary.textContent = findings.length ? "Marked" : "Not marked";
+  boardLocation.textContent = findings.length ? "Listed" : "No clear focus";
+  boardState.textContent = ok ? "Ready for review" : "Needs input";
 
   if (data.overlay_url) {
     resultImage.src = `${data.overlay_url}?t=${Date.now()}`;
@@ -222,8 +234,8 @@ function renderResult(data) {
     resultFeed.innerHTML = findings
       .map((finding) => {
         const detail = finding.area_ratio > 0.035
-          ? "A broader warm focus is marked on the thermal map for careful review."
-          : "A focused warm region is marked on the thermal map.";
+          ? "A broader thermal focus is marked on the returned image for careful review."
+          : "A focused thermal region is marked on the returned image.";
         return findingCard(finding.label, detail, false);
       })
       .join("");
@@ -240,6 +252,9 @@ function renderError(message) {
   scanChip.textContent = "Check input";
   resultStatus.textContent = "Image unavailable";
   resultNarrative.textContent = message;
+  boardBoundary.textContent = "Unavailable";
+  boardLocation.textContent = "Unavailable";
+  boardState.textContent = "Try again";
   resultFeed.innerHTML = findingCard("Analysis failed", message, true);
   showToast(message);
 }
@@ -286,11 +301,26 @@ function drawMriPreview(time) {
   ctx.clearRect(0, 0, width, height);
 
   const bg = ctx.createLinearGradient(0, 0, width, height);
-  bg.addColorStop(0, "#ffffff");
-  bg.addColorStop(0.58, "#f0f8f2");
-  bg.addColorStop(1, "#e5eee8");
+  bg.addColorStop(0, "#07110d");
+  bg.addColorStop(0.58, "#12251c");
+  bg.addColorStop(1, "#0a1510");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, width, height);
+
+  ctx.strokeStyle = "rgba(238, 248, 242, 0.055)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x < width; x += 28) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+  for (let y = 0; y < height; y += 28) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
 
   ctx.save();
   ctx.translate(cx, cy);
@@ -309,16 +339,16 @@ function drawMriPreview(time) {
       0,
       Math.PI * 2,
     );
-    ctx.strokeStyle = i % 4 === 0 ? "rgba(46, 118, 84, 0.24)" : "rgba(71, 85, 105, 0.15)";
+    ctx.strokeStyle = i % 4 === 0 ? "rgba(79, 181, 173, 0.22)" : "rgba(238, 248, 242, 0.12)";
     ctx.lineWidth = 2;
     ctx.stroke();
   }
 
   const brain = ctx.createRadialGradient(-28, -36, 28, 0, 0, 300);
-  brain.addColorStop(0, "#ffffff");
-  brain.addColorStop(0.46, "#dae8df");
-  brain.addColorStop(0.84, "#a2b5aa");
-  brain.addColorStop(1, "#778b80");
+  brain.addColorStop(0, "#f7fbf8");
+  brain.addColorStop(0.42, "#cad9d0");
+  brain.addColorStop(0.76, "#889b91");
+  brain.addColorStop(1, "#52645a");
   ctx.fillStyle = brain;
   ctx.beginPath();
   ctx.moveTo(0, -270);
@@ -329,10 +359,10 @@ function drawMriPreview(time) {
   ctx.fill();
 
   const heat = ctx.createRadialGradient(88, -44, 8, 88, -44, 86 + pulse * 14);
-  heat.addColorStop(0, "rgba(255, 245, 220, 0.94)");
-  heat.addColorStop(0.24, "rgba(240, 106, 42, 0.76)");
-  heat.addColorStop(0.58, "rgba(198, 51, 34, 0.44)");
-  heat.addColorStop(1, "rgba(240, 106, 42, 0)");
+  heat.addColorStop(0, "rgba(255, 248, 218, 0.98)");
+  heat.addColorStop(0.24, "rgba(232, 111, 45, 0.88)");
+  heat.addColorStop(0.58, "rgba(186, 57, 28, 0.56)");
+  heat.addColorStop(1, "rgba(232, 111, 45, 0)");
   ctx.fillStyle = heat;
   ctx.beginPath();
   ctx.ellipse(88, -44, 94 + pulse * 10, 68 + pulse * 8, 0.4, 0, Math.PI * 2);
@@ -340,17 +370,17 @@ function drawMriPreview(time) {
 
   ctx.beginPath();
   ctx.ellipse(88, -44, 54 + pulse * 7, 38 + pulse * 5, 0.4, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(240, 106, 42, 0.86)";
+  ctx.strokeStyle = "rgba(255, 231, 184, 0.92)";
   ctx.lineWidth = 4;
   ctx.stroke();
 
   ctx.restore();
 
-  ctx.fillStyle = "rgba(16, 32, 25, 0.68)";
+  ctx.fillStyle = "rgba(238, 248, 242, 0.82)";
   ctx.font = "700 18px Inter, system-ui, sans-serif";
   ctx.fillText("THERMAL REVIEW MAP", 34, 48);
-  ctx.fillStyle = "rgba(46, 118, 84, 0.85)";
-  ctx.fillText("side-by-side ready", 34, 78);
+  ctx.fillStyle = "rgba(232, 111, 45, 0.9)";
+  ctx.fillText("tumor focus ready", 34, 78);
 
   state.animationFrame = requestAnimationFrame(drawMriPreview);
 }
@@ -385,7 +415,7 @@ volumeForm.addEventListener("submit", (event) => {
 
 scanInput.addEventListener("change", () => {
   const file = scanInput.files[0];
-  singleFileName.textContent = file ? file.name : "Choose MRI image or video";
+  singleFileName.textContent = file ? file.name : "Drop or choose MRI image";
   setSourceFromFile(file);
   resetResultPreview();
 });
