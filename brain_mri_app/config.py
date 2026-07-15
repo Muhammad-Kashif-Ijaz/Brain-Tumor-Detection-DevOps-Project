@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 
@@ -15,3 +16,4 @@ class DefaultConfig:
     MODEL_BUNDLE_DIR = Path(os.getenv("MODEL_BUNDLE_DIR", INSTANCE_DIR / "models"))
     AUTO_DOWNLOAD_MODEL = os.getenv("AUTO_DOWNLOAD_MODEL", "false").lower() == "true"
     MAX_VIDEO_FRAMES = int(os.getenv("MAX_VIDEO_FRAMES", "10"))
+    ASSET_VERSION = os.getenv("ASSET_VERSION", str(int(time.time())))

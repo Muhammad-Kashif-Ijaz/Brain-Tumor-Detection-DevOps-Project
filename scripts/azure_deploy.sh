@@ -581,6 +581,7 @@ from pathlib import Path
 content = Path("k8s/deployment.yaml").read_text(encoding="utf-8")
 content = content.replace("__FILE_SHARE_NAME__", "${FILE_SHARE_NAME}")
 content = content.replace("__IMAGE_URI__", "${IMAGE_URI}")
+content = content.replace("__ASSET_VERSION__", "${IMAGE_TAG}")
 print(content)
 PY
 }

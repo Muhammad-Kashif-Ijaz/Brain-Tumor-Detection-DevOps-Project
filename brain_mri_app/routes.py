@@ -18,7 +18,17 @@ def before_request():
 
 @bp.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", asset_version=current_app.config["ASSET_VERSION"])
+
+
+@bp.get("/model")
+def model_page():
+    return render_template("model.html", asset_version=current_app.config["ASSET_VERSION"])
+
+
+@bp.get("/workflow")
+def workflow_page():
+    return render_template("workflow.html", asset_version=current_app.config["ASSET_VERSION"])
 
 
 @bp.get("/healthz")
@@ -36,6 +46,7 @@ def readyz():
             "static_found": (root_path / "static").exists(),
             "upload_storage_ready": Path(current_app.config["UPLOAD_FOLDER"]).exists(),
             "result_storage_ready": Path(current_app.config["RESULT_FOLDER"]).exists(),
+            "asset_version": current_app.config["ASSET_VERSION"],
         }
     )
 

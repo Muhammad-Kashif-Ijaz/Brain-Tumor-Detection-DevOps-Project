@@ -39,6 +39,8 @@ spec:
           env:
             - name: APP_STORAGE_DIR
               value: /app/instance
+            - name: ASSET_VERSION
+              value: "__ASSET_VERSION__"
             - name: AUTO_DOWNLOAD_MODEL
               value: "true"
             - name: MAX_UPLOAD_MB

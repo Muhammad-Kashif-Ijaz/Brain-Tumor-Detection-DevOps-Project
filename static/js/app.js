@@ -1,7 +1,8 @@
 const state = {
   busy: false,
-  cameraStream: null,
   cameraReady: false,
+  cameraStream: null,
+  sourceObjectUrl: null,
   animationFrame: null,
 };
 
@@ -12,7 +13,12 @@ const volumeForm = document.getElementById("volumeForm");
 const scanInput = document.getElementById("scanInput");
 const dropzone = document.getElementById("dropzone");
 const singleFileName = document.getElementById("singleFileName");
+const sourceImage = document.getElementById("sourceImage");
+const sourceEmpty = document.getElementById("sourceEmpty");
+const sourceStatus = document.getElementById("sourceStatus");
 const resultImage = document.getElementById("resultImage");
+const resultStatus = document.getElementById("resultStatus");
+const resultNarrative = document.getElementById("resultNarrative");
 const viewerTitle = document.getElementById("viewerTitle");
 const modelChip = document.getElementById("modelChip");
 const metricStatus = document.getElementById("metricStatus");
@@ -38,7 +44,7 @@ function setMode(mode) {
   panes.forEach((pane) => pane.classList.toggle("active", pane.dataset.pane === mode));
 
   if (mode === "live" && !cameraCanRun()) {
-    showToast("Live camera needs HTTPS or localhost. Upload MRI scans normally from the MRI scan tab.");
+    showToast("Live camera needs HTTPS or localhost. Upload MRI scans normally from the MRI image tab.");
   }
 }
 
@@ -59,7 +65,7 @@ function refreshCameraState() {
   }
 
   cameraHelp.textContent = state.cameraReady
-    ? "Camera is active. Capture a frame to generate a thermal overlay."
+    ? "Camera is active. Capture a frame to generate a thermal review."
     : "Start the camera and capture one frame for review.";
   cameraEmpty.hidden = state.cameraReady;
   if (!state.cameraReady) {
@@ -71,7 +77,7 @@ function showToast(message) {
   toast.textContent = message;
   toast.classList.add("show");
   window.clearTimeout(showToast.timeout);
-  showToast.timeout = window.setTimeout(() => toast.classList.remove("show"), 3400);
+  showToast.timeout = window.setTimeout(() => toast.classList.remove("show"), 3600);
 }
 
 function setBusy(isBusy, label = "Analyzing") {
@@ -85,9 +91,67 @@ function setBusy(isBusy, label = "Analyzing") {
 
   if (isBusy) {
     metricStatus.textContent = label;
-    viewerTitle.textContent = "Scanning";
+    metricRegions.textContent = "Reviewing";
+    metricLatency.textContent = "Processing";
+    viewerTitle.textContent = "Scanning study";
+    resultStatus.textContent = "Generating map";
     modelChip.textContent = "Thermal scan running";
+    resultNarrative.textContent = "The scan is being reviewed and the thermal tumor map is being prepared.";
   }
+}
+
+function resetResultPreview() {
+  resultImage.hidden = true;
+  resultImage.removeAttribute("src");
+  mriCanvas.hidden = false;
+  resultStatus.textContent = "Pending review";
+  viewerTitle.textContent = "Waiting for scan";
+  modelChip.textContent = "Scanner ready";
+  metricStatus.textContent = "Ready";
+  metricRegions.textContent = "Overlay waiting";
+  metricLatency.textContent = "Review pending";
+  resultNarrative.textContent = "Upload a scan to generate a side-by-side thermal review.";
+  resultFeed.innerHTML = findingCard("No scan loaded", "Possible tumor locations will be listed here after analysis.", true);
+}
+
+function showSourceImage(url, statusText) {
+  sourceImage.src = url;
+  sourceImage.hidden = false;
+  sourceEmpty.hidden = true;
+  sourceStatus.textContent = statusText;
+}
+
+function showSourcePlaceholder(title, statusText) {
+  sourceImage.hidden = true;
+  sourceImage.removeAttribute("src");
+  sourceEmpty.hidden = false;
+  sourceEmpty.innerHTML = `<span></span><strong>${escapeHtml(title)}</strong>`;
+  sourceStatus.textContent = statusText;
+}
+
+function setSourceFromFile(file) {
+  if (state.sourceObjectUrl) {
+    URL.revokeObjectURL(state.sourceObjectUrl);
+    state.sourceObjectUrl = null;
+  }
+
+  if (!file) {
+    showSourcePlaceholder("Original image appears here", "No scan loaded");
+    return;
+  }
+
+  if (file.type.startsWith("image/")) {
+    state.sourceObjectUrl = URL.createObjectURL(file);
+    showSourceImage(state.sourceObjectUrl, "Image loaded");
+    return;
+  }
+
+  if (file.type.startsWith("video/")) {
+    showSourcePlaceholder("Video study selected", "Frames will be sampled");
+    return;
+  }
+
+  showSourcePlaceholder("Study selected", "Volume study loaded");
 }
 
 async function postForm(formData) {
@@ -133,40 +197,49 @@ function renderResult(data) {
   const ok = data.status === "ok";
   const findings = data.findings || [];
 
-  metricStatus.textContent = ok ? "Complete" : data.status || "Review";
-  metricRegions.textContent = findings.length ? "Highlighted" : "Clear";
-  metricLatency.textContent = findings.length ? "Clinician review" : "No urgent marker";
+  metricStatus.textContent = ok ? "Complete" : "Review needed";
+  metricRegions.textContent = findings.length ? "Thermal focus marked" : "No focus marked";
+  metricLatency.textContent = findings.length ? "Doctor review advised" : "Continue review";
   modelChip.textContent = ok ? "Thermal review ready" : "Review needed";
-  viewerTitle.textContent = ok ? "Thermal overlay ready" : "Review needed";
+  viewerTitle.textContent = ok ? "Thermal map ready" : "Review needed";
+  resultStatus.textContent = ok ? "Thermal image ready" : "Check result";
 
   if (data.overlay_url) {
     resultImage.src = `${data.overlay_url}?t=${Date.now()}`;
     resultImage.hidden = false;
+    mriCanvas.hidden = true;
   } else if (ok) {
     renderError("The scan finished, but the thermal image was not returned.");
     return;
   }
 
   if (!findings.length) {
+    resultNarrative.textContent = "No clear tumor focus was highlighted. Continue clinical review if symptoms or scan history require it.";
     resultFeed.innerHTML = findingCard("No highlighted tumor region", data.message || "No result message returned.", true);
   } else {
+    const firstFinding = findings[0].label || "possible tumor region";
+    resultNarrative.textContent = `${capitalizeSentence(firstFinding)}. The thermal image marks the review area side by side with the original scan.`;
     resultFeed.innerHTML = findings
       .map((finding) => {
         const detail = finding.area_ratio > 0.035
-          ? "A larger thermal focus was highlighted for careful review."
-          : "A focused warm region was highlighted on the scan.";
+          ? "A broader warm focus is marked on the thermal map for careful review."
+          : "A focused warm region is marked on the thermal map.";
         return findingCard(finding.label, detail, false);
       })
       .join("");
   }
 
-  showToast(data.message || "Analysis complete");
+  showToast(data.message || "Thermal review complete");
 }
 
 function renderError(message) {
   metricStatus.textContent = "Error";
+  metricRegions.textContent = "Not available";
+  metricLatency.textContent = "Try again";
   viewerTitle.textContent = "Analysis stopped";
   modelChip.textContent = "Check input";
+  resultStatus.textContent = "Image unavailable";
+  resultNarrative.textContent = message;
   resultFeed.innerHTML = findingCard("Analysis failed", message, true);
   showToast(message);
 }
@@ -181,6 +254,14 @@ function findingCard(title, detail, empty) {
       </div>
     </article>
   `;
+}
+
+function capitalizeSentence(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function escapeHtml(value) {
@@ -206,8 +287,8 @@ function drawMriPreview(time) {
 
   const bg = ctx.createLinearGradient(0, 0, width, height);
   bg.addColorStop(0, "#ffffff");
-  bg.addColorStop(0.58, "#eef8f7");
-  bg.addColorStop(1, "#e6eeee");
+  bg.addColorStop(0.58, "#f0f8f2");
+  bg.addColorStop(1, "#e5eee8");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, width, height);
 
@@ -228,16 +309,16 @@ function drawMriPreview(time) {
       0,
       Math.PI * 2,
     );
-    ctx.strokeStyle = i % 4 === 0 ? "rgba(15, 118, 110, 0.24)" : "rgba(71, 85, 105, 0.16)";
+    ctx.strokeStyle = i % 4 === 0 ? "rgba(46, 118, 84, 0.24)" : "rgba(71, 85, 105, 0.15)";
     ctx.lineWidth = 2;
     ctx.stroke();
   }
 
   const brain = ctx.createRadialGradient(-28, -36, 28, 0, 0, 300);
   brain.addColorStop(0, "#ffffff");
-  brain.addColorStop(0.46, "#d9e7eb");
-  brain.addColorStop(0.84, "#9fb3bc");
-  brain.addColorStop(1, "#748894");
+  brain.addColorStop(0.46, "#dae8df");
+  brain.addColorStop(0.84, "#a2b5aa");
+  brain.addColorStop(1, "#778b80");
   ctx.fillStyle = brain;
   ctx.beginPath();
   ctx.moveTo(0, -270);
@@ -249,9 +330,9 @@ function drawMriPreview(time) {
 
   const heat = ctx.createRadialGradient(88, -44, 8, 88, -44, 86 + pulse * 14);
   heat.addColorStop(0, "rgba(255, 245, 220, 0.94)");
-  heat.addColorStop(0.24, "rgba(249, 115, 22, 0.76)");
-  heat.addColorStop(0.58, "rgba(220, 38, 38, 0.44)");
-  heat.addColorStop(1, "rgba(249, 115, 22, 0)");
+  heat.addColorStop(0.24, "rgba(240, 106, 42, 0.76)");
+  heat.addColorStop(0.58, "rgba(198, 51, 34, 0.44)");
+  heat.addColorStop(1, "rgba(240, 106, 42, 0)");
   ctx.fillStyle = heat;
   ctx.beginPath();
   ctx.ellipse(88, -44, 94 + pulse * 10, 68 + pulse * 8, 0.4, 0, Math.PI * 2);
@@ -259,23 +340,17 @@ function drawMriPreview(time) {
 
   ctx.beginPath();
   ctx.ellipse(88, -44, 54 + pulse * 7, 38 + pulse * 5, 0.4, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(249, 115, 22, 0.86)";
+  ctx.strokeStyle = "rgba(240, 106, 42, 0.86)";
   ctx.lineWidth = 4;
   ctx.stroke();
 
   ctx.restore();
 
-  ctx.beginPath();
-  ctx.arc(cx, cy, 302 + pulse * 8, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(15, 118, 110, 0.32)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  ctx.fillStyle = "rgba(15, 23, 42, 0.68)";
+  ctx.fillStyle = "rgba(16, 32, 25, 0.68)";
   ctx.font = "700 18px Inter, system-ui, sans-serif";
-  ctx.fillText("MRI THERMAL MAP", 34, 48);
-  ctx.fillStyle = "rgba(15, 118, 110, 0.85)";
-  ctx.fillText("review ready", 34, 78);
+  ctx.fillText("THERMAL REVIEW MAP", 34, 48);
+  ctx.fillStyle = "rgba(46, 118, 84, 0.85)";
+  ctx.fillText("side-by-side ready", 34, 78);
 
   state.animationFrame = requestAnimationFrame(drawMriPreview);
 }
@@ -287,10 +362,12 @@ tabs.forEach((tab) => {
 singleForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const formData = new FormData(singleForm);
-  if (!formData.get("scan") || !formData.get("scan").name) {
+  const file = formData.get("scan");
+  if (!file || !file.name) {
     showToast("Choose an MRI image or video first.");
     return;
   }
+  setSourceFromFile(file);
   postForm(formData);
 });
 
@@ -302,12 +379,15 @@ volumeForm.addEventListener("submit", (event) => {
     showToast(`Missing ${missing.join(", ")} volume.`);
     return;
   }
+  showSourcePlaceholder("Volume MRI study selected", "Volume study loaded");
   postForm(formData);
 });
 
 scanInput.addEventListener("change", () => {
   const file = scanInput.files[0];
   singleFileName.textContent = file ? file.name : "Choose MRI image or video";
+  setSourceFromFile(file);
+  resetResultPreview();
 });
 
 ["dragenter", "dragover"].forEach((eventName) => {
@@ -329,6 +409,8 @@ dropzone.addEventListener("drop", (event) => {
   if (file) {
     scanInput.files = event.dataTransfer.files;
     singleFileName.textContent = file.name;
+    setSourceFromFile(file);
+    resetResultPreview();
   }
 });
 
@@ -373,7 +455,10 @@ captureFrame.addEventListener("click", () => {
   captureCanvas.width = width;
   captureCanvas.height = height;
   captureCanvas.getContext("2d").drawImage(cameraFeed, 0, 0, width, height);
-  postLiveFrame(captureCanvas.toDataURL("image/jpeg", 0.9));
+  const frame = captureCanvas.toDataURL("image/jpeg", 0.9);
+  showSourceImage(frame, "Camera frame loaded");
+  resetResultPreview();
+  postLiveFrame(frame);
 });
 
 resultImage.addEventListener("error", () => {

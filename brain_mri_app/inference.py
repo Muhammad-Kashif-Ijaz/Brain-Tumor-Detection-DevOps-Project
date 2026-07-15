@@ -506,6 +506,21 @@ class BrainTumorInference:
 
         contours, _ = cv2.findContours(mask_uint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(overlay, contours, -1, (255, 232, 188), 2)
+        for contour in contours:
+            if cv2.contourArea(contour) < 12:
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            label = "Possible tumor"
+            label_y = max(22, y - 8)
+            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
+            cv2.rectangle(
+                overlay,
+                (x, label_y - text_size[1] - 8),
+                (x + text_size[0] + 12, label_y + 5),
+                (38, 50, 42),
+                -1,
+            )
+            cv2.putText(overlay, label, (x + 6, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 236, 202), 2, cv2.LINE_AA)
         return overlay
 
     def _components_to_findings(self, mask: np.ndarray, shape: Tuple[int, int], label: str = "possible tumor region") -> List[Finding]:

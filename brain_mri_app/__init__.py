@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from flask import Flask
+from flask import Flask, request
 
 from .config import BASE_DIR, DefaultConfig
 from .inference import BrainTumorInference
@@ -27,6 +27,14 @@ def create_app(config_override=None):
         auto_download_model=app.config["AUTO_DOWNLOAD_MODEL"],
         max_video_frames=app.config["MAX_VIDEO_FRAMES"],
     )
+
+    @app.after_request
+    def add_no_cache_headers(response):
+        if request.path == "/" or request.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
     app.register_blueprint(bp)
     return app
