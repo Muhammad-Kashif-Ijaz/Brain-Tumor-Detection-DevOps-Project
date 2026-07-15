@@ -208,6 +208,21 @@ state_has() {
   terraform state show "$1" >/dev/null 2>&1
 }
 
+resource_exists() {
+  az resource show --ids "$1" >/dev/null 2>&1
+}
+
+remove_stale_state_if_missing() {
+  local address="$1"
+  local id="$2"
+  local label="$3"
+
+  if state_has "$address" && ! resource_exists "$id"; then
+    echo "Terraform state tracks ${label}, but Azure no longer has it. Removing stale Terraform state..."
+    terraform state rm "$address" >/dev/null
+  fi
+}
+
 import_if_exists() {
   local address="$1"
   local id="$2"
@@ -218,9 +233,27 @@ import_if_exists() {
     return
   fi
 
-  if az resource show --ids "$id" >/dev/null 2>&1; then
+  if resource_exists "$id"; then
     echo "Importing existing ${label} into Terraform state..."
     terraform import -input=false "$address" "$id"
+  fi
+}
+
+try_import_if_untracked() {
+  local address="$1"
+  local id="$2"
+  local label="$3"
+
+  if state_has "$address"; then
+    echo "Terraform state already tracks ${label}."
+    return
+  fi
+
+  echo "Checking whether ${label} already exists and can be imported..."
+  if terraform import -input=false "$address" "$id" >/dev/null 2>&1; then
+    echo "Imported existing ${label} into Terraform state."
+  else
+    echo "No importable existing ${label} found. Terraform will create it if needed."
   fi
 }
 
@@ -251,44 +284,65 @@ first_matching_resource_name() {
     -o tsv 2>/dev/null || true
 }
 
-echo "Reconciling Terraform state with any resources from earlier failed runs..."
-import_resource_group_if_exists \
-  "azurerm_resource_group.main" \
-  "$APP_RESOURCE_GROUP"
-import_if_exists \
-  "azurerm_log_analytics_workspace.main" \
-  "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.OperationalInsights/workspaces/${APP_PREFIX}-logs" \
-  "Log Analytics workspace ${APP_PREFIX}-logs"
-import_if_exists \
-  "azurerm_application_insights.main" \
-  "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Insights/components/${APP_PREFIX}-appi" \
-  "Application Insights component ${APP_PREFIX}-appi"
-import_if_exists \
-  "azurerm_kubernetes_cluster.main" \
-  "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerService/managedClusters/${APP_PREFIX}-aks" \
-  "AKS cluster ${APP_PREFIX}-aks"
+reconcile_terraform_state() {
+  echo "Reconciling Terraform state with any resources from earlier failed runs..."
+  import_resource_group_if_exists \
+    "azurerm_resource_group.main" \
+    "$APP_RESOURCE_GROUP"
 
-COMPACT_PROJECT="${NORMALIZED_PROJECT//-/}"
-RANDOM_NAME_PREFIX="${COMPACT_PROJECT}${ENVIRONMENT}"
-EXISTING_ACR_NAME="$(first_matching_resource_name "Microsoft.ContainerRegistry/registries" "$RANDOM_NAME_PREFIX")"
-if [ -n "$EXISTING_ACR_NAME" ]; then
-  import_if_exists \
-    "azurerm_container_registry.main" \
-    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/${EXISTING_ACR_NAME}" \
-    "Container Registry ${EXISTING_ACR_NAME}"
-fi
+  local logs_id="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.OperationalInsights/workspaces/${APP_PREFIX}-logs"
+  local appi_id="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Insights/components/${APP_PREFIX}-appi"
+  local aks_id="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerService/managedClusters/${APP_PREFIX}-aks"
 
-EXISTING_STORAGE_ACCOUNT_NAME="$(first_matching_resource_name "Microsoft.Storage/storageAccounts" "$RANDOM_NAME_PREFIX")"
-if [ -n "$EXISTING_STORAGE_ACCOUNT_NAME" ]; then
-  import_if_exists \
-    "azurerm_storage_account.main" \
-    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}" \
-    "storage account ${EXISTING_STORAGE_ACCOUNT_NAME}"
-  import_if_exists \
-    "azurerm_storage_share.app" \
-    "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}/fileServices/default/shares/${FILE_SHARE_NAME}" \
-    "Azure Files share ${EXISTING_STORAGE_ACCOUNT_NAME}/${FILE_SHARE_NAME}"
-fi
+  remove_stale_state_if_missing \
+    "azurerm_log_analytics_workspace.main" \
+    "$logs_id" \
+    "Log Analytics workspace ${APP_PREFIX}-logs"
+  try_import_if_untracked \
+    "azurerm_log_analytics_workspace.main" \
+    "$logs_id" \
+    "Log Analytics workspace ${APP_PREFIX}-logs"
+
+  remove_stale_state_if_missing \
+    "azurerm_application_insights.main" \
+    "$appi_id" \
+    "Application Insights component ${APP_PREFIX}-appi"
+  try_import_if_untracked \
+    "azurerm_application_insights.main" \
+    "$appi_id" \
+    "Application Insights component ${APP_PREFIX}-appi"
+
+  remove_stale_state_if_missing \
+    "azurerm_kubernetes_cluster.main" \
+    "$aks_id" \
+    "AKS cluster ${APP_PREFIX}-aks"
+  try_import_if_untracked \
+    "azurerm_kubernetes_cluster.main" \
+    "$aks_id" \
+    "AKS cluster ${APP_PREFIX}-aks"
+
+  COMPACT_PROJECT="${NORMALIZED_PROJECT//-/}"
+  RANDOM_NAME_PREFIX="${COMPACT_PROJECT}${ENVIRONMENT}"
+  EXISTING_ACR_NAME="$(first_matching_resource_name "Microsoft.ContainerRegistry/registries" "$RANDOM_NAME_PREFIX")"
+  if [ -n "$EXISTING_ACR_NAME" ]; then
+    import_if_exists \
+      "azurerm_container_registry.main" \
+      "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/${EXISTING_ACR_NAME}" \
+      "Container Registry ${EXISTING_ACR_NAME}"
+  fi
+
+  EXISTING_STORAGE_ACCOUNT_NAME="$(first_matching_resource_name "Microsoft.Storage/storageAccounts" "$RANDOM_NAME_PREFIX")"
+  if [ -n "$EXISTING_STORAGE_ACCOUNT_NAME" ]; then
+    import_if_exists \
+      "azurerm_storage_account.main" \
+      "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}" \
+      "storage account ${EXISTING_STORAGE_ACCOUNT_NAME}"
+    import_if_exists \
+      "azurerm_storage_share.app" \
+      "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${APP_RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${EXISTING_STORAGE_ACCOUNT_NAME}/fileServices/default/shares/${FILE_SHARE_NAME}" \
+      "Azure Files share ${EXISTING_STORAGE_ACCOUNT_NAME}/${FILE_SHARE_NAME}"
+  fi
+}
 
 terraform_apply() {
   terraform apply -input=false -auto-approve \
@@ -298,16 +352,35 @@ terraform_apply() {
     -var="node_vm_size=${AKS_NODE_VM_SIZE}"
 }
 
-apply_log="$(mktemp)"
-if ! terraform_apply 2>&1 | tee "$apply_log"; then
-  if grep -Eq "Provider produced inconsistent result after apply|Root object was present, but now absent" "$apply_log"; then
-    echo "Terraform provider returned a transient Azure consistency error. Waiting 90 seconds, then retrying once..."
-    sleep 90
-    terraform_apply
-  else
+terraform_apply_with_recovery() {
+  local attempt=1
+  local max_attempts=3
+  local apply_log
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    reconcile_terraform_state
+    apply_log="$(mktemp)"
+
+    if terraform_apply 2>&1 | tee "$apply_log"; then
+      return
+    fi
+
+    if grep -Eq "Provider produced inconsistent result after apply|Root object was present, but now absent|ResourceNotFound|was not found|already exists - to be managed via Terraform" "$apply_log"; then
+      echo "Terraform and Azure are temporarily out of sync after attempt ${attempt}/${max_attempts}."
+      echo "Waiting 90 seconds, reconciling state again, then retrying..."
+      sleep 90
+      attempt=$((attempt + 1))
+      continue
+    fi
+
     exit 1
-  fi
-fi
+  done
+
+  echo "Terraform apply failed after ${max_attempts} recovery attempts." >&2
+  exit 1
+}
+
+terraform_apply_with_recovery
 
 ACR_NAME="$(terraform output -raw acr_name)"
 ACR_LOGIN_SERVER="$(terraform output -raw acr_login_server)"
