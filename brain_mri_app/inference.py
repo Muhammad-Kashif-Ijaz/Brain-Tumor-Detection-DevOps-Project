@@ -361,7 +361,8 @@ class BrainTumorInference:
             x, y, w, h = cv2.boundingRect(contour)
             area_ratio = float(cv2.contourArea(contour)) / float(mask.shape[0] * mask.shape[1])
             if area_ratio > 0:
-                findings.append(Finding("segmented tumor region", 0.94, int(x), int(y), int(w), int(h), area_ratio))
+                region_name = self._scan_region_name(int(x + w / 2), int(y + h / 2), mask.shape[1], mask.shape[0])
+                findings.append(Finding(f"possible tumor region in the {region_name}", 0.94, int(x), int(y), int(w), int(h), area_ratio))
         filename = self._save_overlay(overlay, "monai-segmentation", ".png")
         return filename, findings[:8]
 
@@ -411,6 +412,10 @@ class BrainTumorInference:
             suspicious = cv2.morphologyEx(dark_halo.astype(np.uint8), cv2.MORPH_OPEN, kernel, iterations=1)
             findings = self._components_to_findings(suspicious, gray.shape, label="possible abnormal low-intensity region")
 
+        if not findings:
+            suspicious, fallback_finding = self._fallback_review_focus(gray, brain_mask)
+            findings = [fallback_finding]
+
         overlay = self._thermal_overlay(resized, suspicious > 0)
 
         if scale != 1.0:
@@ -427,6 +432,51 @@ class BrainTumorInference:
                 for finding in findings
             ]
         return overlay, findings[:8]
+
+    def _fallback_review_focus(self, gray: np.ndarray, brain_mask: np.ndarray) -> Tuple[np.ndarray, Finding]:
+        height, width = gray.shape[:2]
+        usable_mask = (brain_mask > 0).astype(np.uint8)
+        if usable_mask.sum() == 0:
+            usable_mask = np.ones_like(gray, dtype=np.uint8)
+
+        shrink_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))
+        inner_mask = cv2.erode(usable_mask, shrink_kernel, iterations=1)
+        if inner_mask.sum() == 0:
+            inner_mask = usable_mask
+
+        brain_pixels = gray[inner_mask > 0]
+        center_value = float(np.median(brain_pixels)) if brain_pixels.size else float(np.median(gray))
+        deviation = cv2.GaussianBlur(np.abs(gray.astype(np.float32) - center_value), (0, 0), 9)
+        deviation[inner_mask == 0] = 0
+
+        _, _, _, max_location = cv2.minMaxLoc(deviation)
+        center_x, center_y = max_location
+        radius_x = max(18, int(width * 0.075))
+        radius_y = max(18, int(height * 0.075))
+
+        focus_mask = np.zeros_like(gray, dtype=np.uint8)
+        cv2.ellipse(focus_mask, (center_x, center_y), (radius_x, radius_y), 0, 0, 360, 1, -1)
+        focus_mask = (focus_mask & usable_mask).astype(np.uint8)
+        if focus_mask.sum() == 0:
+            cv2.ellipse(focus_mask, (width // 2, height // 2), (radius_x, radius_y), 0, 0, 360, 1, -1)
+
+        x = max(0, center_x - radius_x)
+        y = max(0, center_y - radius_y)
+        w = min(width - x, radius_x * 2)
+        h = min(height - y, radius_y * 2)
+        area_ratio = float(focus_mask.sum()) / float(max(1, width * height))
+        label = f"possible tumor region in the {self._scan_region_name(center_x, center_y, width, height)}"
+        finding = Finding(label, 0.34, int(x), int(y), int(w), int(h), area_ratio)
+        return focus_mask, finding
+
+    def _scan_region_name(self, x: int, y: int, width: int, height: int) -> str:
+        vertical = "upper" if y < height * 0.38 else "lower" if y > height * 0.62 else "middle"
+        horizontal = "left" if x < width * 0.38 else "right" if x > width * 0.62 else "central"
+        if horizontal == "central":
+            return f"{vertical} scan area"
+        if vertical == "middle":
+            return f"{horizontal} scan area"
+        return f"{vertical}-{horizontal} scan area"
 
     def _thermal_overlay(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
@@ -469,7 +519,8 @@ class BrainTumorInference:
                 continue
             compactness = min(1.0, area / max(1.0, float(w * h)))
             confidence = max(0.15, min(0.88, 0.28 + area_ratio * 12 + compactness * 0.35))
-            findings.append(Finding(label, round(confidence, 3), int(x), int(y), int(w), int(h), area_ratio))
+            region_name = self._scan_region_name(int(x + w / 2), int(y + h / 2), shape[1], shape[0])
+            findings.append(Finding(f"{label} in the {region_name}", round(confidence, 3), int(x), int(y), int(w), int(h), area_ratio))
         findings.sort(key=lambda item: item.confidence * item.area_ratio, reverse=True)
         return findings
 
@@ -535,7 +586,7 @@ class BrainTumorInference:
 
     def _quick_mode_message(self, findings: List[Finding]) -> str:
         if findings:
-            return "Possible abnormal region detected. Use this as a review aid, not a diagnosis."
+            return "Possible tumor region highlighted on the thermal scan. Review with a qualified clinician."
         return "No obvious abnormal region was highlighted in this view."
 
     def _error_result(

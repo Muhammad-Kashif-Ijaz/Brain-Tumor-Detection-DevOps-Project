@@ -86,7 +86,7 @@ function setBusy(isBusy, label = "Analyzing") {
   if (isBusy) {
     metricStatus.textContent = label;
     viewerTitle.textContent = "Scanning";
-    modelChip.textContent = "Thermal map running";
+    modelChip.textContent = "Thermal scan running";
   }
 }
 
@@ -136,12 +136,15 @@ function renderResult(data) {
   metricStatus.textContent = ok ? "Complete" : data.status || "Review";
   metricRegions.textContent = findings.length ? "Highlighted" : "Clear";
   metricLatency.textContent = findings.length ? "Clinician review" : "No urgent marker";
-  modelChip.textContent = data.model_name || "Model complete";
+  modelChip.textContent = ok ? "Thermal review ready" : "Review needed";
   viewerTitle.textContent = ok ? "Thermal overlay ready" : "Review needed";
 
   if (data.overlay_url) {
     resultImage.src = `${data.overlay_url}?t=${Date.now()}`;
     resultImage.hidden = false;
+  } else if (ok) {
+    renderError("The scan finished, but the thermal image was not returned.");
+    return;
   }
 
   if (!findings.length) {
@@ -371,6 +374,10 @@ captureFrame.addEventListener("click", () => {
   captureCanvas.height = height;
   captureCanvas.getContext("2d").drawImage(cameraFeed, 0, 0, width, height);
   postLiveFrame(captureCanvas.toDataURL("image/jpeg", 0.9));
+});
+
+resultImage.addEventListener("error", () => {
+  renderError("The thermal result image could not be loaded. Please scan again.");
 });
 
 refreshCameraState();
