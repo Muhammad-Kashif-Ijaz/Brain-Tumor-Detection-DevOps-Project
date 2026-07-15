@@ -3,17 +3,19 @@
 NeuroScope MRI is a Flask web app for brain MRI review. It supports:
 
 - 3D multimodal MRI tumor segmentation with the MONAI `brats_mri_segmentation` bundle.
-- Image, video, and webcam frame overlays for quick visual review.
-- A polished white clinical UI with animated MRI visualization.
+- Pretrained PyTorch U-Net segmentation for MRI images, sampled video frames, and camera captures.
+- A full-width enterprise reading room with source/result comparison, export, and responsive controls.
 - One-command Azure deployment through Terraform, AKS, ACR, Azure Files, Log Analytics, Azure Monitor, GitHub Actions, and Jenkins.
 
 This is a research and engineering project, not a medical device. Do not use it for diagnosis without clinical validation and qualified medical review.
 
 ## Model
 
-The production MRI path is wired for MONAI Model Zoo's `brats_mri_segmentation` bundle. That bundle is designed for four aligned MRI volumes: T1c, T1, T2, and FLAIR.
+The volumetric path uses MONAI Model Zoo's `brats_mri_segmentation` bundle version `0.5.4`. It is designed for four aligned MRI volumes: T1c, T1, T2, and FLAIR, and returns whole-tumor, tumor-core, and enhancing-tumor segmentation.
 
-Single image, video, and live-camera modes use a lightweight visual triage overlay because a random 2D screenshot or webcam frame is not enough for diagnostic-grade tumor segmentation.
+Image, video, and camera modes use the pretrained U-Net checkpoint from [mateuszbuda/brain-segmentation-pytorch](https://github.com/mateuszbuda/brain-segmentation-pytorch), which was trained for FLAIR abnormality segmentation on the TCIA lower-grade glioma collection. Its architecture and checkpoint are MIT licensed. These modes are slice-level research review only; a random screenshot or camera frame is not sufficient for diagnostic-grade segmentation.
+
+Both checkpoints are downloaded while the container image is built. They are stored under `/app/models`, outside the Azure Files mount, so every deployed pod starts with the same model artifacts and does not download them during a request.
 
 ## Run Locally
 
@@ -28,7 +30,7 @@ python app.py
 
 Open `http://127.0.0.1:5000`.
 
-To download the MONAI model bundle locally:
+To download both trained model packages locally:
 
 ```bash
 python scripts/download_model.py
@@ -65,7 +67,7 @@ The workflow automatically:
 2. Provisions Azure resources with Terraform.
 3. Builds and pushes the Docker image to Azure Container Registry.
 4. Deploys the app to AKS.
-5. Mounts Azure Files for uploads, results, and model cache.
+5. Mounts Azure Files for temporary uploads and generated review images.
 6. Enables Azure Monitor Container Insights through Log Analytics.
 
 ## Jenkins

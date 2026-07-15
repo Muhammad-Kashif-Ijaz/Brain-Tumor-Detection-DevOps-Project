@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 instance/
+models/
 .pytest_cache/
 .terraform/
 *.tfstate

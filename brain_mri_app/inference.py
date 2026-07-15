@@ -1,8 +1,10 @@
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -16,7 +18,6 @@ from PIL import Image
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-NIFTI_EXTENSIONS = {".nii", ".gz"}
 
 
 @dataclass
@@ -39,6 +40,7 @@ class AnalysisResult:
     message: str
     inference_ms: int
     model_loaded: bool
+    source_preview_filename: Optional[str] = None
     overlay_filename: Optional[str] = None
     findings: List[Finding] = field(default_factory=list)
     details: Dict[str, object] = field(default_factory=dict)
@@ -50,7 +52,7 @@ class AnalysisResult:
 
 
 class BrainTumorInference:
-    """Inference facade for MRI volume segmentation and lightweight frame review."""
+    """Research inference service for 2D MRI review and 3D BraTS segmentation."""
 
     def __init__(
         self,
@@ -63,9 +65,17 @@ class BrainTumorInference:
         self.model_bundle_dir = model_bundle_dir
         self.auto_download_model = auto_download_model
         self.max_video_frames = max_video_frames
+
         self.monai_model_name = "brats_mri_segmentation"
+        self.monai_bundle_version = "0.5.4"
         self.monai_bundle_root = self.model_bundle_dir / self.monai_model_name
-        self.quick_model_name = "MRI intensity and morphology triage overlay"
+
+        self.slice_model_root = self.model_bundle_dir / "lgg_unet"
+        self.slice_weights_path = self.slice_model_root / "unet.pt"
+        self.quick_model_name = "PyTorch U-Net FLAIR abnormality segmentation"
+        self._slice_model = None
+        self._slice_model_lock = threading.Lock()
+        self._slice_inference_lock = threading.Lock()
 
     def analyze_file(self, file_path: Path) -> AnalysisResult:
         suffix = file_path.suffix.lower()
@@ -78,167 +88,136 @@ class BrainTumorInference:
             mode="upload",
             input_type=suffix or "unknown",
             model_name=self.quick_model_name,
-            message="Unsupported file type. Upload an image, video, or four NIfTI MRI volumes.",
+            message="This file type is not supported. Choose an MRI image, video, or four NIfTI volumes.",
             inference_ms=0,
-            model_loaded=False,
+            model_loaded=self.slice_weights_path.exists(),
         )
 
     def analyze_live_frame(self, data_url: str) -> AnalysisResult:
-        start = time.time()
+        started = time.time()
         try:
             _, encoded = data_url.split(",", 1)
-            raw = base64.b64decode(encoded)
-            rgb = self._image_bytes_to_rgb(raw)
+            rgb = self._image_bytes_to_rgb(base64.b64decode(encoded))
             overlay, findings = self._analyze_rgb_array(rgb)
-            filename = self._save_overlay(overlay, "live", ".jpg")
-            elapsed = int((time.time() - start) * 1000)
+            filename = self._save_overlay(overlay, "camera-review", ".jpg")
             return AnalysisResult(
                 status="ok",
                 mode="live",
-                input_type="webcam-frame",
+                input_type="camera-frame",
                 model_name=self.quick_model_name,
-                message=self._quick_mode_message(findings),
-                inference_ms=elapsed,
+                message=self._slice_mode_message(findings),
+                inference_ms=int((time.time() - started) * 1000),
                 model_loaded=True,
                 overlay_filename=filename,
                 findings=findings,
-                details={"frame_source": "browser camera snapshot"},
+                details={"review_scope": "single captured frame"},
             )
         except Exception as exc:
-            elapsed = int((time.time() - start) * 1000)
-            return self._error_result("live", "webcam-frame", elapsed, exc)
+            return self._error_result("live", "camera-frame", started, exc)
 
     def analyze_image(self, file_path: Path) -> AnalysisResult:
-        start = time.time()
+        started = time.time()
         try:
             rgb = np.array(Image.open(file_path).convert("RGB"))
             overlay, findings = self._analyze_rgb_array(rgb)
             filename = self._save_overlay(overlay, file_path.stem, ".jpg")
-            elapsed = int((time.time() - start) * 1000)
             return AnalysisResult(
                 status="ok",
                 mode="single-image",
                 input_type=file_path.suffix.lower(),
                 model_name=self.quick_model_name,
-                message=self._quick_mode_message(findings),
-                inference_ms=elapsed,
+                message=self._slice_mode_message(findings),
+                inference_ms=int((time.time() - started) * 1000),
                 model_loaded=True,
                 overlay_filename=filename,
                 findings=findings,
                 details={
-                    "clinical_note": "Single 2D images cannot provide diagnostic-grade tumor segmentation.",
-                    "recommended_mode": "Use four aligned BraTS-style NIfTI MRI volumes for the MONAI model.",
+                    "review_scope": "single MRI slice",
+                    "recommended_mode": "Use aligned T1c, T1, T2, and FLAIR volumes for volumetric segmentation.",
                 },
             )
         except Exception as exc:
-            elapsed = int((time.time() - start) * 1000)
-            return self._error_result("single-image", file_path.suffix.lower(), elapsed, exc)
+            return self._error_result("single-image", file_path.suffix.lower(), started, exc)
 
     def analyze_video(self, file_path: Path) -> AnalysisResult:
-        start = time.time()
+        started = time.time()
         cap = cv2.VideoCapture(str(file_path))
         if not cap.isOpened():
-            return AnalysisResult(
-                status="error",
-                mode="video",
-                input_type=file_path.suffix.lower(),
-                model_name=self.quick_model_name,
-                message="The video could not be opened.",
-                inference_ms=0,
-                model_loaded=False,
-            )
+            return self._error_result("video", file_path.suffix.lower(), started, ValueError("The video could not be opened."))
 
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         sample_indexes = self._sample_indexes(frame_count, self.max_video_frames)
-        overlays = []
-        all_findings = []
-
+        overlays: List[Tuple[int, np.ndarray]] = []
+        all_findings: List[Finding] = []
         current_index = 0
         sample_position = 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if sample_position < len(sample_indexes) and current_index >= sample_indexes[sample_position]:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                overlay, findings = self._analyze_rgb_array(rgb)
-                overlays.append((sample_indexes[sample_position], overlay))
-                for finding in findings:
-                    finding.label = f"frame {sample_indexes[sample_position]}: {finding.label}"
-                all_findings.extend(findings[:2])
-                sample_position += 1
-            current_index += 1
-            if sample_position >= len(sample_indexes):
-                break
 
-        cap.release()
+        try:
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if sample_position < len(sample_indexes) and current_index >= sample_indexes[sample_position]:
+                    overlay, findings = self._analyze_rgb_array(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    frame_index = sample_indexes[sample_position]
+                    overlays.append((frame_index, overlay))
+                    for finding in findings[:2]:
+                        area = finding.label.rsplit(" in the ", 1)[-1]
+                        finding.label = f"possible tumor region in a reviewed video frame ({area})"
+                    all_findings.extend(findings[:2])
+                    sample_position += 1
+                current_index += 1
+                if sample_position >= len(sample_indexes):
+                    break
+        except Exception as exc:
+            return self._error_result("video", file_path.suffix.lower(), started, exc)
+        finally:
+            cap.release()
+
         if not overlays:
-            elapsed = int((time.time() - start) * 1000)
-            return AnalysisResult(
-                status="error",
-                mode="video",
-                input_type=file_path.suffix.lower(),
-                model_name=self.quick_model_name,
-                message="No readable frames were found in the video.",
-                inference_ms=elapsed,
-                model_loaded=False,
-            )
+            return self._error_result("video", file_path.suffix.lower(), started, ValueError("No readable frames were found."))
 
-        sheet = self._make_contact_sheet(overlays)
-        filename = self._save_overlay(sheet, file_path.stem, ".jpg")
-        elapsed = int((time.time() - start) * 1000)
+        filename = self._save_overlay(self._make_contact_sheet(overlays), file_path.stem, ".jpg")
         return AnalysisResult(
             status="ok",
             mode="video",
             input_type=file_path.suffix.lower(),
             model_name=self.quick_model_name,
-            message=self._quick_mode_message(all_findings),
-            inference_ms=elapsed,
+            message=self._slice_mode_message(all_findings),
+            inference_ms=int((time.time() - started) * 1000),
             model_loaded=True,
             overlay_filename=filename,
             findings=all_findings[:10],
-            details={
-                "sampled_frames": [index for index, _ in overlays],
-                "clinical_note": "Video review samples frames and is not a clinical MRI segmentation workflow.",
-            },
+            details={"review_scope": "sampled video frames"},
         )
 
     def analyze_multimodal_nifti(self, modality_paths: Dict[str, Path]) -> AnalysisResult:
-        start = time.time()
+        started = time.time()
         missing = [name for name in ("t1c", "t1", "t2", "flair") if name not in modality_paths]
         if missing:
             return AnalysisResult(
                 status="missing-inputs",
                 mode="3d-mri",
                 input_type="nifti",
-                model_name="MONAI brats_mri_segmentation",
-                message=f"Missing required MRI modalities: {', '.join(missing)}.",
+                model_name="MONAI BraTS MRI segmentation",
+                message=f"Add the missing MRI series: {', '.join(missing)}.",
                 inference_ms=0,
-                model_loaded=self.monai_bundle_root.exists(),
+                model_loaded=self._monai_bundle_ready(),
             )
 
-        model_ready = self._ensure_monai_bundle()
-        if not model_ready:
-            elapsed = int((time.time() - start) * 1000)
+        if not self._ensure_monai_bundle():
             return AnalysisResult(
                 status="model-not-ready",
                 mode="3d-mri",
                 input_type="nifti",
-                model_name="MONAI brats_mri_segmentation",
-                message=(
-                    "The MONAI BraTS model bundle is not present yet. "
-                    "Run scripts/download_model.py once, or set AUTO_DOWNLOAD_MODEL=true."
-                ),
-                inference_ms=elapsed,
+                model_name="MONAI BraTS MRI segmentation",
+                message="The volumetric analysis package is unavailable in this deployment. Redeploy the current container image.",
+                inference_ms=int((time.time() - started) * 1000),
                 model_loaded=False,
-                details={
-                    "expected_bundle_path": str(self.monai_bundle_root),
-                    "required_modalities": ["t1c", "t1", "t2", "flair"],
-                },
             )
 
+        output_dir = self.result_folder / f".monai-{uuid.uuid4().hex}"
         try:
-            output_dir = self.result_folder / f"monai-{uuid.uuid4().hex}"
             output_dir.mkdir(parents=True, exist_ok=True)
             datalist_path = self._write_monai_datalist(modality_paths, output_dir)
             cmd = [
@@ -256,41 +235,56 @@ class BrainTumorInference:
                 str(datalist_path),
                 "--output_dir",
                 str(output_dir),
+                "--dataloader#num_workers",
+                "0",
+                "--evaluator#amp",
+                "false",
             ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=900)
-            segmentation_path = self._find_latest_segmentation(output_dir)
-            overlay_filename, findings = self._render_segmentation_preview(
+            completed = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=1200)
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "unknown inference error").strip().splitlines()[-1]
+                raise RuntimeError(f"Volumetric analysis did not complete: {detail}")
+
+            segmentation_path = self._find_segmentation(output_dir)
+            source_filename, overlay_filename, findings, subregions = self._render_segmentation_preview(
                 flair_path=modality_paths["flair"],
                 segmentation_path=segmentation_path,
             )
-            elapsed = int((time.time() - start) * 1000)
+            message = (
+                "Possible tumor regions were segmented across the MRI volume and marked on the review image."
+                if findings
+                else "No tumor region was segmented in the submitted MRI volume."
+            )
             return AnalysisResult(
                 status="ok",
                 mode="3d-mri",
                 input_type="nifti",
-                model_name="MONAI brats_mri_segmentation",
-                message="Volume tumor segmentation completed. Review the overlay with a qualified clinician.",
-                inference_ms=elapsed,
+                model_name="MONAI BraTS MRI segmentation",
+                message=message,
+                inference_ms=int((time.time() - started) * 1000),
                 model_loaded=True,
+                source_preview_filename=source_filename,
                 overlay_filename=overlay_filename,
                 findings=findings,
                 details={
-                    "segmentation_file": str(segmentation_path),
-                    "modalities": sorted(modality_paths.keys()),
-                    "labels": {
-                        "1": "tumor core",
-                        "2": "whole tumor",
-                        "4": "enhancing tumor",
-                    },
+                    "modalities": ["T1c", "T1", "T2", "FLAIR"],
+                    "subregions": subregions,
+                    "review_scope": "aligned multimodal MRI volume",
                 },
             )
         except Exception as exc:
-            elapsed = int((time.time() - start) * 1000)
-            return self._error_result("3d-mri", "nifti", elapsed, exc, "MONAI brats_mri_segmentation")
+            return self._error_result("3d-mri", "nifti", started, exc, "MONAI BraTS MRI segmentation")
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+    def _monai_bundle_ready(self) -> bool:
+        config = self.monai_bundle_root / "configs" / "inference.json"
+        checkpoint = self.monai_bundle_root / "models" / "model.pt"
+        scripted = self.monai_bundle_root / "models" / "model.ts"
+        return config.exists() and (checkpoint.exists() or scripted.exists())
 
     def _ensure_monai_bundle(self) -> bool:
-        inference_config = self.monai_bundle_root / "configs" / "inference.json"
-        if inference_config.exists():
+        if self._monai_bundle_ready():
             return True
         if not self.auto_download_model:
             return False
@@ -301,172 +295,52 @@ class BrainTumorInference:
             "download",
             "--name",
             self.monai_model_name,
+            "--version",
+            self.monai_bundle_version,
             "--bundle_dir",
             str(self.model_bundle_dir),
         ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=900)
-        return inference_config.exists()
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1200)
+        return self._monai_bundle_ready()
 
-    def _write_monai_datalist(self, modality_paths: Dict[str, Path], output_dir: Path) -> Path:
-        case_dir = output_dir / "case"
-        case_dir.mkdir(parents=True, exist_ok=True)
-        ordered = []
-        for name in ("t1c", "t1", "t2", "flair"):
-            source = modality_paths[name]
-            target = case_dir / f"{name}{''.join(source.suffixes)}"
-            if source.resolve() != target.resolve():
-                target.write_bytes(source.read_bytes())
-            ordered.append(str(target))
-        datalist = {"testing": [{"image": ordered}]}
-        datalist_path = output_dir / "datalist.json"
-        datalist_path.write_text(json.dumps(datalist), encoding="utf-8")
-        return datalist_path
+    def _load_slice_model(self):
+        if self._slice_model is not None:
+            return self._slice_model
+        if not self.slice_weights_path.exists():
+            raise RuntimeError("The MRI slice model is unavailable in this deployment. Redeploy the current container image.")
 
-    def _find_latest_segmentation(self, output_dir: Path) -> Path:
-        candidates = sorted(output_dir.rglob("*.nii*"), key=lambda path: path.stat().st_mtime, reverse=True)
-        for path in candidates:
-            if "seg" in path.name.lower() or "pred" in path.name.lower():
-                return path
-        if candidates:
-            return candidates[0]
-        raise FileNotFoundError("MONAI completed without a NIfTI segmentation output.")
+        with self._slice_model_lock:
+            if self._slice_model is not None:
+                return self._slice_model
+            import torch
 
-    def _render_segmentation_preview(self, flair_path: Path, segmentation_path: Path) -> Tuple[str, List[Finding]]:
-        try:
-            import nibabel as nib
-        except ImportError as exc:
-            raise RuntimeError("nibabel is required to render 3D segmentation previews.") from exc
+            from .lgg_unet import LGGUNet
 
-        flair = nib.load(str(flair_path)).get_fdata()
-        seg = nib.load(str(segmentation_path)).get_fdata()
-        seg = self._coerce_segmentation_mask(seg)
-        if flair.shape[:3] != seg.shape[:3]:
-            min_shape = tuple(min(a, b) for a, b in zip(flair.shape[:3], seg.shape[:3]))
-            flair = flair[: min_shape[0], : min_shape[1], : min_shape[2]]
-            seg = seg[: min_shape[0], : min_shape[1], : min_shape[2]]
-
-        tumor_by_slice = np.sum(seg > 0, axis=(0, 1))
-        z_index = int(np.argmax(tumor_by_slice)) if np.max(tumor_by_slice) > 0 else flair.shape[2] // 2
-        image = flair[:, :, z_index]
-        mask = seg[:, :, z_index]
-        image = self._normalize_to_uint8(image)
-        rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        overlay = self._thermal_overlay(rgb, mask > 0)
-        contours_mask = (mask > 0).astype(np.uint8) * 255
-        contours, _ = cv2.findContours(contours_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, (255, 229, 180), 2)
-
-        findings = []
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            area_ratio = float(cv2.contourArea(contour)) / float(mask.shape[0] * mask.shape[1])
-            if area_ratio > 0:
-                region_name = self._scan_region_name(int(x + w / 2), int(y + h / 2), mask.shape[1], mask.shape[0])
-                findings.append(Finding(f"possible tumor region in the {region_name}", 0.94, int(x), int(y), int(w), int(h), area_ratio))
-        filename = self._save_overlay(overlay, "monai-segmentation", ".png")
-        return filename, findings[:8]
-
-    def _coerce_segmentation_mask(self, seg: np.ndarray) -> np.ndarray:
-        seg = np.squeeze(seg)
-        if seg.ndim == 3:
-            return seg
-        if seg.ndim != 4:
-            raise ValueError(f"Unsupported segmentation shape: {seg.shape}")
-
-        if seg.shape[0] in (3, 4):
-            channels = seg
-        elif seg.shape[-1] in (3, 4):
-            channels = np.moveaxis(seg, -1, 0)
-        else:
-            raise ValueError(f"Unsupported channel layout for segmentation: {seg.shape}")
-
-        label_map = np.zeros(channels.shape[1:], dtype=np.uint8)
-        # MONAI BraTS output channels are TC, WT, ET. Convert to BraTS labels 1, 2, 4.
-        for channel_index, label in enumerate((1, 2, 4)):
-            if channel_index < channels.shape[0]:
-                label_map[channels[channel_index] > 0.5] = label
-        return label_map
+            model = LGGUNet(in_channels=3, out_channels=1, features=32)
+            try:
+                state_dict = torch.load(self.slice_weights_path, map_location="cpu", weights_only=True)
+            except TypeError:
+                state_dict = torch.load(self.slice_weights_path, map_location="cpu")
+            state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+            model.load_state_dict(state_dict)
+            model.eval()
+            torch.set_num_threads(max(1, min(2, os.cpu_count() or 1)))
+            self._slice_model = model
+        return self._slice_model
 
     def _analyze_rgb_array(self, rgb: np.ndarray) -> Tuple[np.ndarray, List[Finding]]:
-        resized, scale = self._fit_image(rgb, max_side=1100)
-        gray = cv2.cvtColor(resized, cv2.COLOR_RGB2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        import torch
 
-        brain_mask = gray > max(8, np.percentile(gray, 18))
-        brain_mask = cv2.morphologyEx(brain_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=1)
-        brain_mask = self._largest_component(brain_mask)
-        if brain_mask.sum() == 0:
-            brain_mask = np.ones_like(gray, dtype=np.uint8)
+        resized, scale = self._fit_image(rgb, max_side=1400)
+        tensor, mapping, brain_mask = self._prepare_slice_tensor(resized)
+        model = self._load_slice_model()
+        with self._slice_inference_lock, torch.inference_mode():
+            probability_small = model(tensor)[0, 0].detach().cpu().numpy()
 
-        smallest_side = max(1, min(gray.shape[:2]))
-        erosion_size = max(9, int(smallest_side * 0.028))
-        if erosion_size % 2 == 0:
-            erosion_size += 1
-        inner_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_size, erosion_size))
-        inner_mask = cv2.erode(brain_mask, inner_kernel, iterations=1)
-        if inner_mask.sum() < brain_mask.sum() * 0.18:
-            inner_mask = brain_mask
-
-        brain_pixels = gray[inner_mask > 0].astype(np.float32)
-        if brain_pixels.size:
-            q1, median, q3 = np.percentile(brain_pixels, [25, 50, 75])
-            robust_scale = max(8.0, float(q3 - q1))
-            high_threshold = float(np.percentile(brain_pixels, 93))
-            low_threshold = float(np.percentile(brain_pixels, 6))
-        else:
-            median = float(np.median(gray))
-            robust_scale = 32.0
-            high_threshold = 230.0
-            low_threshold = 25.0
-
-        gray_float = gray.astype(np.float32)
-        sigma = max(7.0, smallest_side * 0.038)
-        local_mean = cv2.GaussianBlur(gray_float, (0, 0), sigma)
-        intensity_deviation = np.abs(gray_float - median) / robust_scale
-        local_deviation = np.abs(gray_float - local_mean)
-        symmetry_deviation = np.abs(gray_float - np.fliplr(gray_float))
-
-        review_area = inner_mask > 0
-        paired_area = review_area & (np.fliplr(brain_mask) > 0)
-        if np.any(review_area):
-            intensity_scale = max(1.0, float(np.percentile(intensity_deviation[review_area], 98)))
-            local_scale = max(1.0, float(np.percentile(local_deviation[review_area], 98)))
-        else:
-            intensity_scale = 1.0
-            local_scale = 1.0
-        symmetry_scale = max(1.0, float(np.percentile(symmetry_deviation[paired_area], 98))) if np.any(paired_area) else 1.0
-
-        anomaly_score = 0.48 * np.clip(intensity_deviation / intensity_scale, 0, 1)
-        anomaly_score += 0.34 * np.clip(local_deviation / local_scale, 0, 1)
-        anomaly_score += 0.18 * np.clip(symmetry_deviation / symmetry_scale, 0, 1)
-        anomaly_score[~review_area] = 0
-
-        if np.any(review_area):
-            score_threshold = max(0.50, float(np.percentile(anomaly_score[review_area], 94.6)))
-        else:
-            score_threshold = 0.7
-
-        bright_focus = (gray_float >= high_threshold) & (anomaly_score >= 0.28)
-        dark_focus = (gray_float <= low_threshold) & (anomaly_score >= 0.36)
-        suspicious = ((anomaly_score >= score_threshold) | bright_focus | dark_focus) & review_area
-
-        kernel_size = max(5, int(smallest_side * 0.015))
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        suspicious = cv2.morphologyEx(suspicious.astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=2)
-        suspicious = cv2.morphologyEx(suspicious, cv2.MORPH_OPEN, kernel, iterations=1)
-        suspicious = cv2.dilate(suspicious, kernel, iterations=1)
-
-        findings = self._components_to_findings(suspicious, gray.shape)
-
-        if not findings:
-            suspicious, fallback_finding = self._fallback_review_focus(gray, brain_mask)
-            findings = [fallback_finding]
-        else:
-            suspicious = self._findings_to_focus_mask(findings, gray.shape, brain_mask)
-
-        overlay = self._thermal_overlay(resized, suspicious > 0)
+        probability = self._restore_slice_prediction(probability_small, mapping, resized.shape[:2])
+        mask = self._clean_slice_mask(probability >= 0.5, brain_mask)
+        findings = self._components_to_findings(mask, resized.shape[:2])
+        overlay = self._thermal_overlay(resized, mask)
 
         if scale != 1.0:
             findings = [
@@ -483,135 +357,243 @@ class BrainTumorInference:
             ]
         return overlay, findings[:8]
 
-    def _findings_to_focus_mask(self, findings: List[Finding], shape: Tuple[int, int], brain_mask: np.ndarray) -> np.ndarray:
-        height, width = shape
-        focus_mask = np.zeros((height, width), dtype=np.uint8)
-        for finding in findings[:8]:
-            center_x = int(finding.x + finding.width / 2)
-            center_y = int(finding.y + finding.height / 2)
-            radius_x = max(22, int(finding.width * 0.9))
-            radius_y = max(22, int(finding.height * 0.9))
-            cv2.ellipse(focus_mask, (center_x, center_y), (radius_x, radius_y), 0, 0, 360, 1, -1)
-        return (focus_mask & (brain_mask > 0).astype(np.uint8)).astype(np.uint8)
+    def _prepare_slice_tensor(self, rgb: np.ndarray):
+        import torch
 
-    def _fallback_review_focus(self, gray: np.ndarray, brain_mask: np.ndarray) -> Tuple[np.ndarray, Finding]:
-        height, width = gray.shape[:2]
-        usable_mask = (brain_mask > 0).astype(np.uint8)
-        if usable_mask.sum() == 0:
-            usable_mask = np.ones_like(gray, dtype=np.uint8)
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        nonzero = gray[gray > 4]
+        threshold = max(6.0, float(np.percentile(nonzero, 12))) if nonzero.size else 6.0
+        brain_mask = (gray >= threshold).astype(np.uint8)
+        brain_mask = cv2.morphologyEx(brain_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=2)
+        brain_mask = self._largest_component(brain_mask)
 
-        shrink_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))
-        inner_mask = cv2.erode(usable_mask, shrink_kernel, iterations=1)
-        if inner_mask.sum() == 0:
-            inner_mask = usable_mask
+        image_area = gray.shape[0] * gray.shape[1]
+        if brain_mask.sum() < image_area * 0.025:
+            raise ValueError("The uploaded frame does not contain a clear MRI slice.")
 
-        brain_pixels = gray[inner_mask > 0]
-        center_value = float(np.median(brain_pixels)) if brain_pixels.size else float(np.median(gray))
-        deviation = cv2.GaussianBlur(np.abs(gray.astype(np.float32) - center_value), (0, 0), 9)
-        deviation[inner_mask == 0] = 0
+        x, y, width, height = cv2.boundingRect(brain_mask)
+        margin = max(8, int(max(width, height) * 0.08))
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        width = min(rgb.shape[1] - x, width + margin * 2)
+        height = min(rgb.shape[0] - y, height + margin * 2)
+        crop = rgb[y : y + height, x : x + width]
 
-        _, _, _, max_location = cv2.minMaxLoc(deviation)
-        center_x, center_y = max_location
-        radius_x = max(18, int(width * 0.075))
-        radius_y = max(18, int(height * 0.075))
+        side = max(width, height)
+        pad_left = (side - width) // 2
+        pad_top = (side - height) // 2
+        square = np.zeros((side, side, 3), dtype=np.uint8)
+        square[pad_top : pad_top + height, pad_left : pad_left + width] = crop
+        model_image = cv2.resize(square, (256, 256), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
 
-        focus_mask = np.zeros_like(gray, dtype=np.uint8)
-        cv2.ellipse(focus_mask, (center_x, center_y), (radius_x, radius_y), 0, 0, 360, 1, -1)
-        focus_mask = (focus_mask & usable_mask).astype(np.uint8)
-        if focus_mask.sum() == 0:
-            cv2.ellipse(focus_mask, (width // 2, height // 2), (radius_x, radius_y), 0, 0, 360, 1, -1)
+        for channel_index in range(3):
+            channel = model_image[:, :, channel_index]
+            lo, hi = np.percentile(channel, [10, 99])
+            if hi <= lo:
+                hi = lo + 1.0
+            channel = np.clip((channel - lo) / (hi - lo), 0.0, 1.0)
+            std = float(channel.std())
+            model_image[:, :, channel_index] = (channel - float(channel.mean())) / max(std, 1e-6)
 
-        x = max(0, center_x - radius_x)
-        y = max(0, center_y - radius_y)
-        w = min(width - x, radius_x * 2)
-        h = min(height - y, radius_y * 2)
-        area_ratio = float(focus_mask.sum()) / float(max(1, width * height))
-        label = f"possible tumor region in the {self._scan_region_name(center_x, center_y, width, height)}"
-        finding = Finding(label, 0.34, int(x), int(y), int(w), int(h), area_ratio)
-        return focus_mask, finding
+        tensor = torch.from_numpy(np.moveaxis(model_image, -1, 0)[None]).float()
+        mapping = {
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "side": side,
+            "pad_left": pad_left,
+            "pad_top": pad_top,
+        }
+        return tensor, mapping, brain_mask
+
+    def _restore_slice_prediction(self, probability: np.ndarray, mapping: Dict[str, int], shape: Tuple[int, int]):
+        square = cv2.resize(probability.astype(np.float32), (mapping["side"], mapping["side"]), interpolation=cv2.INTER_LINEAR)
+        crop = square[
+            mapping["pad_top"] : mapping["pad_top"] + mapping["height"],
+            mapping["pad_left"] : mapping["pad_left"] + mapping["width"],
+        ]
+        restored = np.zeros(shape, dtype=np.float32)
+        restored[
+            mapping["y"] : mapping["y"] + mapping["height"],
+            mapping["x"] : mapping["x"] + mapping["width"],
+        ] = crop
+        return restored
+
+    def _clean_slice_mask(self, mask: np.ndarray, brain_mask: np.ndarray) -> np.ndarray:
+        cleaned = mask.astype(np.uint8)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=1)
+        guard = cv2.dilate(brain_mask.astype(np.uint8), np.ones((11, 11), np.uint8), iterations=1)
+        cleaned &= guard
+
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(cleaned, 8)
+        filtered = np.zeros_like(cleaned)
+        image_area = cleaned.shape[0] * cleaned.shape[1]
+        brain_area = max(1, int(brain_mask.sum()))
+        minimum = max(18, int(image_area * 0.00012))
+        maximum = int(brain_area * 0.42)
+        for index in range(1, count):
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if minimum <= area <= maximum:
+                filtered[labels == index] = 1
+        return filtered
+
+    def _write_monai_datalist(self, modality_paths: Dict[str, Path], output_dir: Path) -> Path:
+        case_dir = output_dir / "case"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        ordered = []
+        for name in ("t1c", "t1", "t2", "flair"):
+            source = modality_paths[name]
+            target = case_dir / f"{name}{''.join(source.suffixes)}"
+            shutil.copyfile(source, target)
+            ordered.append(str(target))
+        datalist_path = output_dir / "datalist.json"
+        datalist_path.write_text(json.dumps({"testing": [{"image": ordered}]}), encoding="utf-8")
+        return datalist_path
+
+    def _find_segmentation(self, output_dir: Path) -> Path:
+        candidates = sorted(output_dir.rglob("*.nii*"), key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in candidates:
+            if "seg" in path.name.lower() or "pred" in path.name.lower():
+                return path
+        raise FileNotFoundError("The volumetric analysis completed without a segmentation result.")
+
+    def _render_segmentation_preview(self, flair_path: Path, segmentation_path: Path):
+        try:
+            import nibabel as nib
+        except ImportError as exc:
+            raise RuntimeError("The NIfTI preview component is unavailable.") from exc
+
+        flair = nib.load(str(flair_path)).get_fdata()
+        segmentation = self._coerce_segmentation_mask(nib.load(str(segmentation_path)).get_fdata())
+        if flair.shape[:3] != segmentation.shape[:3]:
+            minimum = tuple(min(a, b) for a, b in zip(flair.shape[:3], segmentation.shape[:3]))
+            flair = flair[: minimum[0], : minimum[1], : minimum[2]]
+            segmentation = segmentation[: minimum[0], : minimum[1], : minimum[2]]
+
+        tumor_by_slice = np.sum(segmentation > 0, axis=(0, 1))
+        z_index = int(np.argmax(tumor_by_slice)) if np.max(tumor_by_slice) > 0 else flair.shape[2] // 2
+        image = np.rot90(self._normalize_to_uint8(flair[:, :, z_index]))
+        mask = np.rot90(segmentation[:, :, z_index])
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        source_rgb = cv2.cvtColor(clahe.apply(image), cv2.COLOR_GRAY2RGB)
+        overlay = self._thermal_overlay(source_rgb, mask > 0)
+        findings = self._components_to_findings(mask > 0, mask.shape)
+
+        subregion_names = []
+        for value, label in ((1, "tumor core"), (2, "whole tumor"), (4, "enhancing tumor")):
+            if np.any(segmentation == value):
+                subregion_names.append(label)
+
+        source_filename = self._save_overlay(source_rgb, "volume-source", ".png")
+        overlay_filename = self._save_overlay(overlay, "volume-segmentation", ".png")
+        return source_filename, overlay_filename, findings[:8], subregion_names
+
+    def _coerce_segmentation_mask(self, segmentation: np.ndarray) -> np.ndarray:
+        segmentation = np.squeeze(segmentation)
+        if segmentation.ndim == 3:
+            if float(np.nanmax(segmentation)) <= 1.0:
+                return (segmentation > 0.5).astype(np.uint8)
+            return np.rint(segmentation).astype(np.uint8)
+        if segmentation.ndim != 4:
+            raise ValueError(f"Unsupported segmentation shape: {segmentation.shape}")
+
+        channel_axes = [index for index, size in enumerate(segmentation.shape) if size in (3, 4)]
+        if not channel_axes:
+            raise ValueError(f"Unsupported segmentation channel layout: {segmentation.shape}")
+        channels = np.moveaxis(segmentation, channel_axes[0], 0)
+
+        label_map = np.zeros(channels.shape[1:], dtype=np.uint8)
+        whole_tumor = channels[1] > 0.5 if channels.shape[0] > 1 else channels[0] > 0.5
+        tumor_core = channels[0] > 0.5
+        enhancing_tumor = channels[2] > 0.5 if channels.shape[0] > 2 else np.zeros_like(tumor_core)
+        label_map[whole_tumor] = 2
+        label_map[tumor_core] = 1
+        label_map[enhancing_tumor] = 4
+        return label_map
+
+    def _thermal_overlay(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        base = cv2.cvtColor(cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray), cv2.COLOR_GRAY2RGB)
+        mask_uint = (mask > 0).astype(np.uint8)
+        if mask_uint.sum() == 0:
+            return base
+
+        smallest_side = max(1, min(mask_uint.shape[:2]))
+        blur_size = max(21, int(smallest_side * 0.055))
+        if blur_size % 2 == 0:
+            blur_size += 1
+        heat = cv2.GaussianBlur(mask_uint * 255, (blur_size, blur_size), 0)
+        heat = cv2.normalize(heat, None, 0, 255, cv2.NORM_MINMAX)
+        color_map = getattr(cv2, "COLORMAP_TURBO", cv2.COLORMAP_JET)
+        thermal = cv2.cvtColor(cv2.applyColorMap(heat, color_map), cv2.COLOR_BGR2RGB)
+        alpha = np.clip(heat.astype(np.float32) / 255.0, 0.0, 0.88)[:, :, None]
+        overlay = (base * (1.0 - alpha) + thermal * alpha).astype(np.uint8)
+
+        contours, _ = cv2.findContours(mask_uint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        glow = cv2.dilate(mask_uint, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)), iterations=1)
+        glow_contours, _ = cv2.findContours(glow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, glow_contours, -1, (255, 102, 46), 5)
+        cv2.drawContours(overlay, contours, -1, (255, 245, 214), 2)
+
+        for contour in contours:
+            if cv2.contourArea(contour) < 12:
+                continue
+            x, y, width, height = cv2.boundingRect(contour)
+            label = "Possible tumor focus"
+            label_y = y - 9 if y > 34 else min(overlay.shape[0] - 8, y + height + 27)
+            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 2)
+            box_top = max(0, label_y - text_size[1] - 8)
+            box_right = min(overlay.shape[1] - 1, x + text_size[0] + 12)
+            cv2.rectangle(overlay, (x, box_top), (box_right, min(overlay.shape[0] - 1, label_y + 5)), (20, 29, 34), -1)
+            cv2.putText(overlay, label, (x + 6, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (255, 239, 202), 2, cv2.LINE_AA)
+            corner = min(34, width, height)
+            cv2.line(overlay, (x, y), (x + corner, y), (255, 245, 214), 2)
+            cv2.line(overlay, (x, y), (x, y + corner), (255, 245, 214), 2)
+            cv2.line(overlay, (x + width, y + height), (x + width - corner, y + height), (255, 245, 214), 2)
+            cv2.line(overlay, (x + width, y + height), (x + width, y + height - corner), (255, 245, 214), 2)
+        return overlay
+
+    def _components_to_findings(self, mask: np.ndarray, shape: Tuple[int, int]) -> List[Finding]:
+        count, _, stats, centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+        image_area = float(max(1, shape[0] * shape[1]))
+        findings = []
+        for index in range(1, count):
+            x, y, width, height, area = stats[index]
+            area_ratio = float(area) / image_area
+            if area_ratio < 0.00012 or area_ratio > 0.42:
+                continue
+            center_x, center_y = centroids[index]
+            region = self._scan_region_name(int(center_x), int(center_y), shape[1], shape[0])
+            findings.append(
+                Finding(
+                    label=f"possible tumor region in the {region}",
+                    confidence=0.0,
+                    x=int(x),
+                    y=int(y),
+                    width=int(width),
+                    height=int(height),
+                    area_ratio=area_ratio,
+                )
+            )
+        findings.sort(key=lambda item: item.area_ratio, reverse=True)
+        return findings
 
     def _scan_region_name(self, x: int, y: int, width: int, height: int) -> str:
         vertical = "upper" if y < height * 0.38 else "lower" if y > height * 0.62 else "middle"
         horizontal = "left" if x < width * 0.38 else "right" if x > width * 0.62 else "central"
         if horizontal == "central":
-            return f"{vertical} scan area"
+            return f"{vertical} central scan area"
         if vertical == "middle":
             return f"{horizontal} scan area"
         return f"{vertical}-{horizontal} scan area"
 
-    def _thermal_overlay(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        base = clahe.apply(gray)
-        base_rgb = cv2.cvtColor(base, cv2.COLOR_GRAY2RGB)
-
-        mask_uint = (mask > 0).astype(np.uint8)
-        if mask_uint.sum() == 0:
-            return base_rgb
-
-        smallest_side = max(1, min(mask_uint.shape[:2]))
-        kernel_size = max(21, int(smallest_side * 0.055))
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-
-        heat = (mask_uint * 255).astype(np.uint8)
-        heat = cv2.GaussianBlur(heat, (kernel_size, kernel_size), 0)
-        if int(heat.max()) > 0:
-            heat = cv2.normalize(heat, None, 0, 255, cv2.NORM_MINMAX)
-
-        color_map = getattr(cv2, "COLORMAP_TURBO", getattr(cv2, "COLORMAP_INFERNO", cv2.COLORMAP_JET))
-        thermal = cv2.applyColorMap(heat, color_map)
-        thermal = cv2.cvtColor(thermal, cv2.COLOR_BGR2RGB)
-        alpha = np.clip(heat.astype(np.float32) / 255.0, 0.0, 0.88)[:, :, None]
-        overlay = (base_rgb * (1 - alpha) + thermal * alpha).astype(np.uint8)
-
-        contours, _ = cv2.findContours(mask_uint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        glow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        glow = cv2.dilate(mask_uint, glow_kernel, iterations=1)
-        glow_contours, _ = cv2.findContours(glow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, glow_contours, -1, (255, 132, 54), 5)
-        cv2.drawContours(overlay, contours, -1, (255, 244, 210), 2)
-        for contour in contours:
-            if cv2.contourArea(contour) < 12:
-                continue
-            x, y, w, h = cv2.boundingRect(contour)
-            label = "Possible tumor region"
-            label_y = max(22, y - 8)
-            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
-            cv2.rectangle(
-                overlay,
-                (x, label_y - text_size[1] - 8),
-                (x + text_size[0] + 12, label_y + 5),
-                (38, 50, 42),
-                -1,
-            )
-            cv2.putText(overlay, label, (x + 6, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 236, 202), 2, cv2.LINE_AA)
-            cv2.line(overlay, (x, y), (x + min(34, w), y), (255, 244, 210), 2)
-            cv2.line(overlay, (x, y), (x, y + min(34, h)), (255, 244, 210), 2)
-            cv2.line(overlay, (x + w, y + h), (x + max(0, w - 34), y + h), (255, 244, 210), 2)
-            cv2.line(overlay, (x + w, y + h), (x + w, y + max(0, h - 34)), (255, 244, 210), 2)
-        return overlay
-
-    def _components_to_findings(self, mask: np.ndarray, shape: Tuple[int, int], label: str = "possible tumor region") -> List[Finding]:
-        count, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
-        image_area = float(shape[0] * shape[1])
-        findings = []
-        for index in range(1, count):
-            x, y, w, h, area = stats[index]
-            area_ratio = float(area) / image_area
-            if area_ratio < 0.00012 or area_ratio > 0.22:
-                continue
-            compactness = min(1.0, area / max(1.0, float(w * h)))
-            confidence = max(0.2, min(0.9, 0.34 + area_ratio * 11 + compactness * 0.34))
-            region_name = self._scan_region_name(int(x + w / 2), int(y + h / 2), shape[1], shape[0])
-            findings.append(Finding(f"{label} in the {region_name}", round(confidence, 3), int(x), int(y), int(w), int(h), area_ratio))
-        findings.sort(key=lambda item: item.confidence * item.area_ratio, reverse=True)
-        return findings
-
     def _largest_component(self, mask: np.ndarray) -> np.ndarray:
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
         if count <= 1:
-            return mask
+            return mask.astype(np.uint8)
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         return (labels == largest).astype(np.uint8)
 
@@ -621,30 +603,27 @@ class BrainTumorInference:
         if largest <= max_side:
             return rgb.copy(), 1.0
         scale = max_side / float(largest)
-        resized = cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
-        return resized, scale
+        return cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA), scale
 
     def _image_bytes_to_rgb(self, raw: bytes) -> np.ndarray:
-        return np.array(Image.open(self._bytes_io(raw)).convert("RGB"))
-
-    def _bytes_io(self, raw: bytes):
         from io import BytesIO
 
-        return BytesIO(raw)
+        return np.array(Image.open(BytesIO(raw)).convert("RGB"))
 
     def _normalize_to_uint8(self, image: np.ndarray) -> np.ndarray:
         values = image.astype(np.float32)
-        lo, hi = np.percentile(values[np.isfinite(values)], [1, 99])
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return np.zeros(values.shape, dtype=np.uint8)
+        lo, hi = np.percentile(finite, [1, 99])
         if hi <= lo:
             hi = lo + 1.0
-        values = np.clip((values - lo) / (hi - lo), 0, 1)
-        return (values * 255).astype(np.uint8)
+        return (np.clip((values - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
 
     def _save_overlay(self, rgb: np.ndarray, stem: str, suffix: str) -> str:
-        safe_stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in stem)[:60]
+        safe_stem = "".join(char if char.isalnum() or char in ("-", "_") else "-" for char in stem)[:60]
         filename = f"{safe_stem}-{uuid.uuid4().hex[:10]}{suffix}"
-        output_path = self.result_folder / filename
-        Image.fromarray(rgb).save(output_path)
+        Image.fromarray(rgb).save(self.result_folder / filename)
         return filename
 
     def _sample_indexes(self, frame_count: int, maximum: int) -> List[int]:
@@ -656,28 +635,28 @@ class BrainTumorInference:
     def _make_contact_sheet(self, overlays: Iterable[Tuple[int, np.ndarray]]) -> np.ndarray:
         tiles = []
         for index, image in overlays:
-            tile = cv2.resize(image, (320, 220), interpolation=cv2.INTER_AREA)
-            cv2.putText(tile, f"Frame {index}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            tile = cv2.resize(image, (360, 250), interpolation=cv2.INTER_AREA)
+            cv2.rectangle(tile, (0, 0), (136, 38), (20, 29, 34), -1)
+            cv2.putText(tile, f"Frame {index}", (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.64, (245, 249, 248), 2)
             tiles.append(tile)
         columns = min(3, len(tiles))
         rows = int(np.ceil(len(tiles) / columns))
-        sheet = np.full((rows * 220, columns * 320, 3), 18, dtype=np.uint8)
-        for idx, tile in enumerate(tiles):
-            row = idx // columns
-            col = idx % columns
-            sheet[row * 220 : (row + 1) * 220, col * 320 : (col + 1) * 320] = tile
+        sheet = np.full((rows * 250, columns * 360, 3), 12, dtype=np.uint8)
+        for index, tile in enumerate(tiles):
+            row, column = divmod(index, columns)
+            sheet[row * 250 : (row + 1) * 250, column * 360 : (column + 1) * 360] = tile
         return sheet
 
-    def _quick_mode_message(self, findings: List[Finding]) -> str:
+    def _slice_mode_message(self, findings: List[Finding]) -> str:
         if findings:
-            return "Possible tumor region highlighted on the thermal scan. Review with a qualified clinician."
-        return "No obvious abnormal region was highlighted in this view."
+            return "Possible tumor tissue was segmented and marked for clinical review."
+        return "No tumor tissue was segmented in this view. Review the full MRI study when clinical concern remains."
 
     def _error_result(
         self,
         mode: str,
         input_type: str,
-        inference_ms: int,
+        started: float,
         exc: Exception,
         model_name: Optional[str] = None,
     ) -> AnalysisResult:
@@ -686,7 +665,7 @@ class BrainTumorInference:
             mode=mode,
             input_type=input_type,
             model_name=model_name or self.quick_model_name,
-            message=f"Analysis failed: {exc}",
-            inference_ms=inference_ms,
+            message=f"Unable to complete this review. {exc}",
+            inference_ms=int((time.time() - started) * 1000),
             model_loaded=False,
         )

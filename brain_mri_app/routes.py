@@ -29,6 +29,7 @@ def healthz():
 @bp.get("/readyz")
 def readyz():
     root_path = Path(current_app.root_path).parent
+    service = current_app.extensions["inference_service"]
     return jsonify(
         {
             "status": "ok",
@@ -37,6 +38,8 @@ def readyz():
             "upload_storage_ready": Path(current_app.config["UPLOAD_FOLDER"]).exists(),
             "result_storage_ready": Path(current_app.config["RESULT_FOLDER"]).exists(),
             "asset_version": current_app.config["ASSET_VERSION"],
+            "slice_model_ready": service.slice_weights_path.exists(),
+            "volume_model_ready": service._monai_bundle_ready(),
         }
     )
 
@@ -56,8 +59,10 @@ def analyze_upload():
     started = time.time()
     service = current_app.extensions["inference_service"]
     upload_dir = Path(current_app.config["UPLOAD_FOLDER"])
+    saved_paths = []
     try:
         modality_paths = _save_modalities(upload_dir)
+        saved_paths.extend(modality_paths.values())
         if modality_paths:
             result = service.analyze_multimodal_nifti(modality_paths)
         else:
@@ -65,12 +70,17 @@ def analyze_upload():
             if not upload or not upload.filename:
                 return jsonify({"status": "error", "message": "Choose an MRI image, video, or NIfTI files."}), 400
             saved_path = _save_upload(upload, upload_dir)
+            saved_paths.append(saved_path)
             result = service.analyze_file(saved_path)
         metrics.record_analysis(time.time() - started, ok=result.status == "ok")
-        return jsonify(_with_overlay_url(result.to_dict()))
-    except Exception as exc:
+        status_code = 200 if result.status == "ok" else 422
+        return jsonify(_with_result_urls(result.to_dict())), status_code
+    except Exception:
         metrics.record_analysis(time.time() - started, ok=False)
-        return jsonify({"status": "error", "message": str(exc)}), 500
+        return jsonify({"status": "error", "message": "The study could not be processed. Please check the files and try again."}), 500
+    finally:
+        for path in saved_paths:
+            path.unlink(missing_ok=True)
 
 
 @bp.post("/api/live-frame")
@@ -83,7 +93,8 @@ def analyze_live_frame():
         return jsonify({"status": "error", "message": "Missing live frame."}), 400
     result = service.analyze_live_frame(frame)
     metrics.record_analysis(time.time() - started, ok=result.status == "ok")
-    return jsonify(_with_overlay_url(result.to_dict()))
+    status_code = 200 if result.status == "ok" else 422
+    return jsonify(_with_result_urls(result.to_dict())), status_code
 
 
 def _save_upload(file_storage, upload_dir: Path) -> Path:
@@ -103,7 +114,10 @@ def _save_modalities(upload_dir: Path):
     return modality_paths
 
 
-def _with_overlay_url(payload):
+def _with_result_urls(payload):
+    source_filename = payload.get("source_preview_filename")
+    if source_filename:
+        payload["source_preview_url"] = url_for("mri.result_file", filename=source_filename)
     filename = payload.get("overlay_filename")
     if filename:
         payload["overlay_url"] = url_for("mri.result_file", filename=filename)

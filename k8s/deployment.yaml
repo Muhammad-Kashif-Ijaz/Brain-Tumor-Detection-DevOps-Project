@@ -42,13 +42,13 @@ spec:
             - name: ASSET_VERSION
               value: "__ASSET_VERSION__"
             - name: AUTO_DOWNLOAD_MODEL
-              value: "true"
+              value: "false"
             - name: MAX_UPLOAD_MB
               value: "512"
             - name: MAX_VIDEO_FRAMES
               value: "10"
             - name: MODEL_BUNDLE_DIR
-              value: /app/instance/models
+              value: /app/models
             - name: UPLOAD_FOLDER
               value: /app/instance/uploads
             - name: RESULT_FOLDER
@@ -73,11 +73,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 50m
-              memory: 768Mi
+              cpu: 100m
+              memory: 1Gi
             limits:
               cpu: "1500m"
-              memory: 4Gi
+              memory: 5Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
