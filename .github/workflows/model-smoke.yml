@@ -134,6 +134,29 @@ jobs:
           cat volume-result.json
           python -c "import json; payload = json.load(open('volume-result.json')); assert payload['status'] == 'ok', payload; assert payload['mode'] == '3d-mri', payload; assert payload['model_loaded'] is True, payload; assert payload.get('overlay_url'), payload; assert payload.get('source_preview_url'), payload; assert 'all-regions overview' in payload.get('details', {}).get('planes', []), payload"
 
+      - name: Verify all credible 3D regions are retained
+        run: |
+          set -euo pipefail
+          docker exec -i cerebravue-model-smoke python - <<'PY'
+          from pathlib import Path
+
+          import numpy as np
+
+          from brain_mri_app.inference import BrainTumorInference
+
+          service = BrainTumorInference(Path('/tmp/results'), Path('/app/models'))
+          segmentation = np.zeros((48, 48, 48), dtype=np.uint8)
+          segmentation[5:8, 5:8, 5:8] = 2
+          segmentation[31:35, 28:32, 20:24] = 4
+          segmentation[1, 1, 1] = 2
+
+          cleaned = service._clean_volume_segmentation(segmentation)
+          findings = service._volume_component_findings(cleaned)
+          assert cleaned[1, 1, 1] == 0, cleaned[1, 1, 1]
+          assert len(findings) == 2, findings
+          print('3D component safeguards verified')
+          PY
+
       - name: Show diagnostics when a check fails
         if: failure()
         run: docker logs cerebravue-model-smoke || true

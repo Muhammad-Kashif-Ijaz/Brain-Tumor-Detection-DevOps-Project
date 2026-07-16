@@ -4,6 +4,7 @@ gunicorn==22.0.0
 Pillow==10.4.0
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
+scipy==1.13.1
 monai==1.4.0
 nibabel==5.2.1
 fire==0.7.0

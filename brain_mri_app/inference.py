@@ -17,6 +17,7 @@ from PIL import Image
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+MAX_RESAMPLED_VOLUME_VOXELS = 20_000_000
 LOGGER = logging.getLogger(__name__)
 
 
@@ -69,6 +70,20 @@ class BrainTumorInference:
         self.monai_model_name = "brats_mri_segmentation"
         self.monai_bundle_version = "0.5.4"
         self.monai_bundle_root = self.model_bundle_dir / self.monai_model_name
+        self.volume_model_name = "MONAI BraTS SegResNet 3D ensemble"
+        # The published training workflow flips all three spatial axes. Evaluate
+        # each mirrored orientation sequentially to improve consistency without
+        # multiplying the peak memory used by one full-study request.
+        self._volume_tta_axes = (
+            (),
+            (2,),
+            (3,),
+            (4,),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+            (2, 3, 4),
+        )
 
         self.slice_model_root = self.model_bundle_dir / "brain_mri_segformer"
         self.slice_weights_path = self.slice_model_root / "model.safetensors"
@@ -233,7 +248,7 @@ class BrainTumorInference:
                 status="missing-inputs",
                 mode="3d-mri",
                 input_type="nifti",
-                model_name="MONAI BraTS MRI segmentation",
+                model_name=self.volume_model_name,
                 message=f"Add the missing MRI series: {', '.join(missing)}.",
                 inference_ms=0,
                 model_loaded=self._monai_bundle_ready(),
@@ -246,7 +261,7 @@ class BrainTumorInference:
                 status="invalid-inputs",
                 mode="3d-mri",
                 input_type="nifti",
-                model_name="MONAI BraTS MRI segmentation",
+                model_name=self.volume_model_name,
                 message=str(exc),
                 inference_ms=int((time.time() - started) * 1000),
                 model_loaded=self._monai_bundle_ready(),
@@ -257,7 +272,7 @@ class BrainTumorInference:
                 status="model-not-ready",
                 mode="3d-mri",
                 input_type="nifti",
-                model_name="MONAI BraTS MRI segmentation",
+                model_name=self.volume_model_name,
                 message="The volumetric analysis package is unavailable in this deployment. Redeploy the current container image.",
                 inference_ms=int((time.time() - started) * 1000),
                 model_loaded=False,
@@ -275,7 +290,7 @@ class BrainTumorInference:
                 status="ok",
                 mode="3d-mri",
                 input_type="nifti",
-                model_name="MONAI BraTS MRI segmentation",
+                model_name=self.volume_model_name,
                 message=message,
                 inference_ms=int((time.time() - started) * 1000),
                 model_loaded=True,
@@ -290,7 +305,7 @@ class BrainTumorInference:
                 },
             )
         except Exception as exc:
-            return self._error_result("3d-mri", "nifti", started, exc, "MONAI BraTS MRI segmentation")
+            return self._error_result("3d-mri", "nifti", started, exc, self.volume_model_name)
 
     def _monai_bundle_ready(self) -> bool:
         checkpoint = self.monai_bundle_root / "models" / "model.pt"
@@ -387,14 +402,35 @@ class BrainTumorInference:
         try:
             import nibabel as nib
             import torch
+            from nibabel.processing import resample_from_to, resample_to_output
             from monai.inferers import SlidingWindowInferer
         except ImportError as exc:
             raise RuntimeError("The volumetric MRI dependencies are unavailable in this deployment.") from exc
 
+        source_images = {
+            name: nib.as_closest_canonical(nib.load(str(modality_paths[name])))
+            for name in ("t1c", "t1", "t2", "flair")
+        }
+        reference = source_images["t1c"]
+        spacing = np.asarray(reference.header.get_zooms()[:3], dtype=np.float32)
+        requires_resample = not np.allclose(spacing, (1.0, 1.0, 1.0), atol=0.05, rtol=0.0)
+        if requires_resample:
+            reference = resample_to_output(reference, voxel_sizes=(1.0, 1.0, 1.0), order=1)
+        if int(np.prod(reference.shape[:3])) > MAX_RESAMPLED_VOLUME_VOXELS:
+            raise ValueError("The submitted MRI volume is too large for this review service.")
+
+        if requires_resample:
+            target_grid = (reference.shape, reference.affine)
+            source_images = {
+                name: reference if name == "t1c" else resample_from_to(image, target_grid, order=1)
+                for name, image in source_images.items()
+            }
+
         source_volumes = {}
         model_channels = []
+        # The MONAI bundle metadata fixes this channel order: T1c, T1, T2, FLAIR.
         for name in ("t1c", "t1", "t2", "flair"):
-            volume = nib.load(str(modality_paths[name])).get_fdata(dtype=np.float32)
+            volume = source_images[name].get_fdata(dtype=np.float32)
             source_volumes[name] = volume
             model_channels.append(self._normalize_brats_channel(volume))
 
@@ -409,9 +445,18 @@ class BrainTumorInference:
             padding_mode="constant",
         )
         with self._volume_inference_lock, torch.inference_mode():
-            logits = inferer(volume_tensor, model)
-            probabilities = torch.sigmoid(logits)[0].float().cpu().numpy()
-        return source_volumes["flair"], self._brats_labels_from_probabilities(probabilities)
+            probability_sum = None
+            for flip_axes in self._volume_tta_axes:
+                augmented = torch.flip(volume_tensor, dims=flip_axes) if flip_axes else volume_tensor
+                logits = inferer(augmented, model)
+                if flip_axes:
+                    logits = torch.flip(logits, dims=flip_axes)
+                probabilities = torch.sigmoid(logits)
+                probability_sum = probabilities if probability_sum is None else probability_sum + probabilities
+            probabilities = (probability_sum / len(self._volume_tta_axes))[0].float().cpu().numpy()
+
+        segmentation = self._brats_labels_from_probabilities(probabilities)
+        return source_volumes["flair"], self._clean_volume_segmentation(segmentation)
 
     @staticmethod
     def _normalize_brats_channel(volume: np.ndarray) -> np.ndarray:
@@ -450,6 +495,33 @@ class BrainTumorInference:
         segmentation[probabilities[0] >= 0.5] = 1
         segmentation[probabilities[2] >= 0.5] = 4
         return segmentation
+
+    @staticmethod
+    def _label_volume_regions(mask: np.ndarray):
+        """Label every 3D candidate region without collapsing separate lesions."""
+        try:
+            from scipy.ndimage import generate_binary_structure, label
+        except ImportError:
+            return None, 0
+
+        labels, count = label(
+            np.asarray(mask, dtype=bool),
+            structure=generate_binary_structure(3, 3),
+        )
+        return labels, int(count)
+
+    def _clean_volume_segmentation(self, segmentation: np.ndarray) -> np.ndarray:
+        """Discard only isolated voxel noise while retaining every credible lesion."""
+        segmentation = np.asarray(segmentation, dtype=np.uint8)
+        labels, count = self._label_volume_regions(segmentation > 0)
+        if labels is None or count == 0:
+            return segmentation
+
+        component_sizes = np.bincount(labels.ravel())
+        minimum_voxels = max(4, min(24, int(round(segmentation.size * 0.000001))))
+        keep = component_sizes >= minimum_voxels
+        keep[0] = False
+        return np.where(keep[labels], segmentation, 0).astype(np.uint8)
 
     def _load_slice_model(self):
         if self._slice_model is not None:
@@ -549,7 +621,13 @@ class BrainTumorInference:
         y = max(0, y - margin)
         width = min(rgb.shape[1] - x, width + margin * 2)
         height = min(rgb.shape[0] - y, height + margin * 2)
-        crop = rgb[y : y + height, x : x + width]
+
+        # A scanner's display window can vary widely. Normalize only the brain
+        # pixels so the slice model sees a stable grayscale MRI representation.
+        normalized_gray = self._window_mri_slice(gray, brain_mask)
+        normalized_gray[brain_mask == 0] = 0
+        normalized_rgb = cv2.cvtColor(normalized_gray, cv2.COLOR_GRAY2RGB)
+        crop = normalized_rgb[y : y + height, x : x + width]
 
         side = max(width, height)
         pad_left = (side - width) // 2
@@ -568,6 +646,18 @@ class BrainTumorInference:
         }
         return model_image, mapping, brain_mask
 
+    @staticmethod
+    def _window_mri_slice(gray: np.ndarray, brain_mask: np.ndarray) -> np.ndarray:
+        values = gray[brain_mask > 0]
+        if values.size == 0:
+            return gray.copy()
+
+        low, high = np.percentile(values, [1.0, 99.0])
+        if float(high - low) < 1.0:
+            return gray.copy()
+        normalized = np.clip((gray.astype(np.float32) - low) / (high - low), 0.0, 1.0)
+        return np.rint(normalized * 255.0).astype(np.uint8)
+
     def _restore_slice_prediction(self, probability: np.ndarray, mapping: Dict[str, int], shape: Tuple[int, int]):
         square = cv2.resize(probability.astype(np.float32), (mapping["side"], mapping["side"]), interpolation=cv2.INTER_LINEAR)
         crop = square[
@@ -585,8 +675,8 @@ class BrainTumorInference:
         cleaned = mask.astype(np.uint8)
         cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
         cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=1)
-        guard = cv2.dilate(brain_mask.astype(np.uint8), np.ones((11, 11), np.uint8), iterations=1)
-        cleaned &= guard
+        # Never paint a candidate outside the detected brain field.
+        cleaned &= brain_mask.astype(np.uint8)
 
         count, labels, stats, _ = cv2.connectedComponentsWithStats(cleaned, 8)
         filtered = np.zeros_like(cleaned)
@@ -617,6 +707,13 @@ class BrainTumorInference:
                 raise ValueError("Each MRI sequence must be one three-dimensional NIfTI volume.")
             if min(image.shape) < 32:
                 raise ValueError("The submitted MRI volume is too small for volumetric review.")
+            volume = image.get_fdata(dtype=np.float32)
+            usable = volume[np.isfinite(volume) & (np.abs(volume) > 1e-6)]
+            if usable.size < volume.size * 0.005:
+                raise ValueError(f"The {name.upper()} sequence does not contain enough MRI signal for volumetric review.")
+            low, high = np.percentile(usable, [1.0, 99.0])
+            if float(high - low) < 1e-5:
+                raise ValueError(f"The {name.upper()} sequence does not contain usable intensity variation.")
             if reference_shape is None:
                 reference_shape = image.shape
                 reference_affine = image.affine
@@ -632,8 +729,8 @@ class BrainTumorInference:
             flair = flair[: minimum[0], : minimum[1], : minimum[2]]
             segmentation = segmentation[: minimum[0], : minimum[1], : minimum[2]]
 
-        source_rgb, overlay, overview_mask = self._make_volume_montages(flair, segmentation)
-        findings = self._components_to_findings(overview_mask > 0, overview_mask.shape)
+        source_rgb, overlay, _ = self._make_volume_montages(flair, segmentation)
+        findings = self._volume_component_findings(segmentation)
 
         subregion_names = []
         for value, label in ((1, "tumor core"), (2, "whole tumor"), (4, "enhancing tumor")):
@@ -643,6 +740,41 @@ class BrainTumorInference:
         source_filename = self._save_overlay(source_rgb, "volume-source", ".png")
         overlay_filename = self._save_overlay(overlay, "volume-segmentation", ".png")
         return source_filename, overlay_filename, findings[:8], subregion_names
+
+    def _volume_component_findings(self, segmentation: np.ndarray) -> List[Finding]:
+        """Return one finding per 3D region, not one per flattened projection."""
+        mask = np.asarray(segmentation > 0, dtype=bool)
+        labels, count = self._label_volume_regions(mask)
+        if labels is None:
+            projection = np.max(mask, axis=2)
+            return self._components_to_findings(projection, projection.shape)
+
+        findings = []
+        volume_size = float(max(1, mask.size))
+        for index in range(1, count + 1):
+            coordinates = np.where(labels == index)
+            voxel_count = int(coordinates[0].size)
+            if voxel_count == 0:
+                continue
+
+            y_start, y_end = int(coordinates[0].min()), int(coordinates[0].max()) + 1
+            x_start, x_end = int(coordinates[1].min()), int(coordinates[1].max()) + 1
+            center_x = int(np.mean(coordinates[1]))
+            center_y = int(np.mean(coordinates[0]))
+            region = self._scan_region_name(center_x, center_y, mask.shape[1], mask.shape[0])
+            findings.append(
+                Finding(
+                    label=f"possible tumor region in the {region}",
+                    confidence=0.0,
+                    x=x_start,
+                    y=y_start,
+                    width=x_end - x_start,
+                    height=y_end - y_start,
+                    area_ratio=voxel_count / volume_size,
+                )
+            )
+        findings.sort(key=lambda item: item.area_ratio, reverse=True)
+        return findings
 
     def _make_volume_montages(self, flair: np.ndarray, segmentation: np.ndarray):
         tumor = segmentation > 0
@@ -669,7 +801,7 @@ class BrainTumorInference:
         for label, image, mask in views:
             normalized = clahe.apply(self._normalize_to_uint8(image))
             source = cv2.cvtColor(normalized, cv2.COLOR_GRAY2RGB)
-            marked = self._thermal_overlay(source, mask > 0)
+            marked = self._volume_thermal_overlay(source, mask)
             source_tiles.append(self._volume_view_tile(source, label))
             overlay_tiles.append(self._volume_view_tile(marked, label))
         return np.hstack(source_tiles), np.hstack(overlay_tiles), overview_mask
@@ -712,6 +844,15 @@ class BrainTumorInference:
         label_map[tumor_core] = 1
         label_map[enhancing_tumor] = 4
         return label_map
+
+    def _volume_thermal_overlay(self, rgb: np.ndarray, labels: np.ndarray) -> np.ndarray:
+        """Keep tumor subregions visible with progressively hotter thermal intensity."""
+        labels = np.asarray(labels, dtype=np.uint8)
+        thermal_levels = np.zeros(labels.shape, dtype=np.float32)
+        thermal_levels[labels == 2] = 0.46
+        thermal_levels[labels == 1] = 0.72
+        thermal_levels[labels == 4] = 1.0
+        return self._thermal_overlay(rgb, labels > 0, thermal_levels)
 
     def _thermal_overlay(
         self,
@@ -942,7 +1083,7 @@ class BrainTumorInference:
     def _slice_mode_message(self, findings: List[Finding]) -> str:
         if findings:
             return "Every possible region detected in the submitted MRI view or views is marked for clinical review."
-        return "No tumor tissue was segmented in this view. Review the full MRI study when clinical concern remains."
+        return "No region was highlighted in this individual view. Use the aligned 3D MRI study for a complete review."
 
     def _error_result(
         self,
@@ -958,7 +1099,7 @@ class BrainTumorInference:
             exc,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
-        volume_model = model_name == "MONAI BraTS MRI segmentation"
+        volume_model = model_name == self.volume_model_name
         return AnalysisResult(
             status="error",
             mode=mode,

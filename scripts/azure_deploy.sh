@@ -531,3 +531,15 @@ echo "Azure resource group: ${RESOURCE_GROUP}"
 echo "Azure Monitor workspace: ${LOG_ANALYTICS_NAME}"
 echo "Application Insights: ${APP_INSIGHTS_NAME}"
 echo "Azure Files share: ${STORAGE_ACCOUNT_NAME}/${FILE_SHARE_NAME}"
+
+# Make the public address easy to find after a successful GitHub Actions run.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "## NeuroScope deployment is live"
+    echo
+    echo "- **Application:** [Open NeuroScope MRI](${APPLICATION_URL})"
+    echo "- **Resource group:** ${RESOURCE_GROUP}"
+    echo "- **Azure Monitor workspace:** ${LOG_ANALYTICS_NAME}"
+    echo "- **Application Insights:** ${APP_INSIGHTS_NAME}"
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
