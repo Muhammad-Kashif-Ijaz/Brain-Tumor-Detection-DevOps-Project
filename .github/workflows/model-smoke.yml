@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          from pathlib import Path
+          from PIL import Image
 
           width = height = 320
           pixels = bytearray()
@@ -57,13 +57,14 @@ jobs:
                   radius = horizontal * horizontal + vertical * vertical
                   value = 8 if radius > 1 else int(72 + (1 - radius) * 128)
                   pixels.extend((value, value, value))
-          Path('/tmp/mri-smoke.png').write_bytes(
-              f'P6\n{width} {height}\n255\n'.encode() + bytes(pixels)
-          )
+          Image.frombytes('RGB', (width, height), bytes(pixels)).save('/tmp/mri-smoke.png')
           PY
-          curl --fail --silent --show-error \
+          if ! curl --fail-with-body --silent --show-error \
             --form "scan=@/tmp/mri-smoke.png;type=image/png" \
-            http://127.0.0.1:5000/api/analyze > result.json
+            http://127.0.0.1:5000/api/analyze > result.json; then
+            cat result.json || true
+            exit 1
+          fi
           cat result.json
           python -c "import json; payload = json.load(open('result.json')); assert payload['status'] == 'ok', payload; assert payload.get('overlay_url'), payload"
 
@@ -71,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          from pathlib import Path
+          from PIL import Image
 
           width, height = 680, 320
           centers = (160, 520)
@@ -86,13 +87,14 @@ jobs:
                       if radius <= 1:
                           value = max(value, int(72 + (1 - radius) * 128))
                   pixels.extend((value, value, value))
-          Path('/tmp/mri-multiview.ppm').write_bytes(
-              f'P6\n{width} {height}\n255\n'.encode() + bytes(pixels)
-          )
+          Image.frombytes('RGB', (width, height), bytes(pixels)).save('/tmp/mri-multiview.png')
           PY
-          curl --fail --silent --show-error \
-            --form "scan=@/tmp/mri-multiview.ppm;type=image/png" \
-            http://127.0.0.1:5000/api/analyze > multiview-result.json
+          if ! curl --fail-with-body --silent --show-error \
+            --form "scan=@/tmp/mri-multiview.png;type=image/png" \
+            http://127.0.0.1:5000/api/analyze > multiview-result.json; then
+            cat multiview-result.json || true
+            exit 1
+          fi
           cat multiview-result.json
           python -c "import json; payload = json.load(open('multiview-result.json')); assert payload['status'] == 'ok', payload; assert payload.get('overlay_url'), payload; assert payload.get('source_preview_url'), payload"
 
@@ -114,12 +116,15 @@ jobs:
           for modality in ('t1c', 't1', 't2', 'flair'):
               nib.save(nib.Nifti1Image(volume, affine), f'/tmp/{modality}.nii.gz')
           PY
-          curl --fail --silent --show-error \
+          if ! curl --fail-with-body --silent --show-error \
             --form "t1c=@/tmp/t1c.nii.gz;type=application/gzip" \
             --form "t1=@/tmp/t1.nii.gz;type=application/gzip" \
             --form "t2=@/tmp/t2.nii.gz;type=application/gzip" \
             --form "flair=@/tmp/flair.nii.gz;type=application/gzip" \
-            http://127.0.0.1:5000/api/analyze > volume-result.json
+            http://127.0.0.1:5000/api/analyze > volume-result.json; then
+            cat volume-result.json || true
+            exit 1
+          fi
           cat volume-result.json
           python -c "import json; payload = json.load(open('volume-result.json')); assert payload['status'] == 'ok', payload; assert payload['mode'] == '3d-mri', payload; assert payload.get('overlay_url'), payload; assert payload.get('source_preview_url'), payload; assert 'all-regions overview' in payload.get('details', {}).get('planes', []), payload"
 
