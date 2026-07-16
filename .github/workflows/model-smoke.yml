@@ -25,7 +25,12 @@ jobs:
 
       - name: Start the application
         run: |
+          set -euo pipefail
+          fixture_dir="$RUNNER_TEMP/cerebravue-smoke"
+          mkdir -p "$fixture_dir"
+          chmod 777 "$fixture_dir"
           docker run --detach --rm --name cerebravue-model-smoke --publish 5000:5000 \
+            --volume "$fixture_dir:/smoke" \
             cerebravue-model-smoke:${{ github.sha }}
 
       - name: Require the trained checkpoint to load
@@ -45,7 +50,7 @@ jobs:
       - name: Exercise one segmentation request
         run: |
           set -euo pipefail
-          python - <<'PY'
+          docker exec -i cerebravue-model-smoke python - <<'PY'
           from PIL import Image
 
           width = height = 320
@@ -57,10 +62,10 @@ jobs:
                   radius = horizontal * horizontal + vertical * vertical
                   value = 8 if radius > 1 else int(72 + (1 - radius) * 128)
                   pixels.extend((value, value, value))
-          Image.frombytes('RGB', (width, height), bytes(pixels)).save('/tmp/mri-smoke.png')
+          Image.frombytes('RGB', (width, height), bytes(pixels)).save('/smoke/mri-smoke.png')
           PY
           if ! curl --fail-with-body --silent --show-error \
-            --form "scan=@/tmp/mri-smoke.png;type=image/png" \
+            --form "scan=@${RUNNER_TEMP}/cerebravue-smoke/mri-smoke.png;type=image/png" \
             http://127.0.0.1:5000/api/analyze > result.json; then
             cat result.json || true
             exit 1
@@ -71,7 +76,7 @@ jobs:
       - name: Exercise a multi-view MRI image
         run: |
           set -euo pipefail
-          python - <<'PY'
+          docker exec -i cerebravue-model-smoke python - <<'PY'
           from PIL import Image
 
           width, height = 680, 320
@@ -87,10 +92,10 @@ jobs:
                       if radius <= 1:
                           value = max(value, int(72 + (1 - radius) * 128))
                   pixels.extend((value, value, value))
-          Image.frombytes('RGB', (width, height), bytes(pixels)).save('/tmp/mri-multiview.png')
+          Image.frombytes('RGB', (width, height), bytes(pixels)).save('/smoke/mri-multiview.png')
           PY
           if ! curl --fail-with-body --silent --show-error \
-            --form "scan=@/tmp/mri-multiview.png;type=image/png" \
+            --form "scan=@${RUNNER_TEMP}/cerebravue-smoke/mri-multiview.png;type=image/png" \
             http://127.0.0.1:5000/api/analyze > multiview-result.json; then
             cat multiview-result.json || true
             exit 1
@@ -101,7 +106,7 @@ jobs:
       - name: Exercise the aligned 3D MRI volume path
         run: |
           set -euo pipefail
-          python - <<'PY'
+          docker exec -i cerebravue-model-smoke python - <<'PY'
           from pathlib import Path
 
           import nibabel as nib
@@ -114,13 +119,13 @@ jobs:
           volume = np.where(radius <= 1, 70 + (1 - radius) * 120, 0).astype(np.float32)
           affine = np.eye(4, dtype=np.float32)
           for modality in ('t1c', 't1', 't2', 'flair'):
-              nib.save(nib.Nifti1Image(volume, affine), f'/tmp/{modality}.nii.gz')
+              nib.save(nib.Nifti1Image(volume, affine), f'/smoke/{modality}.nii.gz')
           PY
           if ! curl --fail-with-body --silent --show-error \
-            --form "t1c=@/tmp/t1c.nii.gz;type=application/gzip" \
-            --form "t1=@/tmp/t1.nii.gz;type=application/gzip" \
-            --form "t2=@/tmp/t2.nii.gz;type=application/gzip" \
-            --form "flair=@/tmp/flair.nii.gz;type=application/gzip" \
+            --form "t1c=@${RUNNER_TEMP}/cerebravue-smoke/t1c.nii.gz;type=application/gzip" \
+            --form "t1=@${RUNNER_TEMP}/cerebravue-smoke/t1.nii.gz;type=application/gzip" \
+            --form "t2=@${RUNNER_TEMP}/cerebravue-smoke/t2.nii.gz;type=application/gzip" \
+            --form "flair=@${RUNNER_TEMP}/cerebravue-smoke/flair.nii.gz;type=application/gzip" \
             http://127.0.0.1:5000/api/analyze > volume-result.json; then
             cat volume-result.json || true
             exit 1
