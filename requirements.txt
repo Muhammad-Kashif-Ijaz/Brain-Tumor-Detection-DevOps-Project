@@ -8,4 +8,7 @@ monai==1.4.0
 nibabel==5.2.1
 fire==0.7.0
 pytorch-ignite==0.4.11
+transformers==4.46.3
+huggingface-hub==0.26.5
+safetensors==0.4.5
 torch==2.4.0+cpu

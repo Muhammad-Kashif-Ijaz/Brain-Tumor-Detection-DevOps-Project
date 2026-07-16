@@ -30,18 +30,18 @@ def healthz():
 def readyz():
     root_path = Path(current_app.root_path).parent
     service = current_app.extensions["inference_service"]
-    return jsonify(
-        {
-            "status": "ok",
-            "template_found": (root_path / "templates" / "index.html").exists(),
-            "static_found": (root_path / "static").exists(),
-            "upload_storage_ready": Path(current_app.config["UPLOAD_FOLDER"]).exists(),
-            "result_storage_ready": Path(current_app.config["RESULT_FOLDER"]).exists(),
-            "asset_version": current_app.config["ASSET_VERSION"],
-            "slice_model_ready": service.slice_weights_path.exists(),
-            "volume_model_ready": service._monai_bundle_ready(),
-        }
-    )
+    slice_model_ready = service.slice_model_ready()
+    payload = {
+        "status": "ok" if slice_model_ready else "unavailable",
+        "template_found": (root_path / "templates" / "index.html").exists(),
+        "static_found": (root_path / "static").exists(),
+        "upload_storage_ready": Path(current_app.config["UPLOAD_FOLDER"]).exists(),
+        "result_storage_ready": Path(current_app.config["RESULT_FOLDER"]).exists(),
+        "asset_version": current_app.config["ASSET_VERSION"],
+        "slice_model_ready": slice_model_ready,
+        "volume_model_ready": service._monai_bundle_ready(),
+    }
+    return jsonify(payload), 200 if slice_model_ready else 503
 
 
 @bp.get("/metrics")

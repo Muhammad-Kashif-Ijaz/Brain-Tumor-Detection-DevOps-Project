@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from PIL import Image
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -70,10 +72,11 @@ class BrainTumorInference:
         self.monai_bundle_version = "0.5.4"
         self.monai_bundle_root = self.model_bundle_dir / self.monai_model_name
 
-        self.slice_model_root = self.model_bundle_dir / "lgg_unet"
-        self.slice_weights_path = self.slice_model_root / "unet.pt"
-        self.quick_model_name = "PyTorch U-Net FLAIR abnormality segmentation"
+        self.slice_model_root = self.model_bundle_dir / "brain_mri_segformer"
+        self.slice_weights_path = self.slice_model_root / "model.safetensors"
+        self.quick_model_name = "SegFormer-B2 single-slice tumor segmentation"
         self._slice_model = None
+        self._slice_processor = None
         self._slice_model_lock = threading.Lock()
         self._slice_inference_lock = threading.Lock()
 
@@ -269,6 +272,7 @@ class BrainTumorInference:
                 details={
                     "modalities": ["T1c", "T1", "T2", "FLAIR"],
                     "subregions": subregions,
+                    "planes": ["sagittal", "coronal", "axial"],
                     "review_scope": "aligned multimodal MRI volume",
                 },
             )
@@ -282,6 +286,15 @@ class BrainTumorInference:
         checkpoint = self.monai_bundle_root / "models" / "model.pt"
         scripted = self.monai_bundle_root / "models" / "model.ts"
         return config.exists() and (checkpoint.exists() or scripted.exists())
+
+    def slice_model_ready(self) -> bool:
+        """Verify the deployed slice checkpoint can be loaded before accepting traffic."""
+        try:
+            self._load_slice_model()
+            return True
+        except Exception as exc:
+            LOGGER.warning("The deployed MRI slice model could not be loaded: %s", exc)
+            return False
 
     def _ensure_monai_bundle(self) -> bool:
         if self._monai_bundle_ready():
@@ -313,34 +326,49 @@ class BrainTumorInference:
             if self._slice_model is not None:
                 return self._slice_model
             import torch
+            from transformers import AutoImageProcessor, AutoModelForSemanticSegmentation
 
-            from .lgg_unet import LGGUNet
-
-            model = LGGUNet(in_channels=3, out_channels=1, features=32)
-            try:
-                state_dict = torch.load(self.slice_weights_path, map_location="cpu", weights_only=True)
-            except TypeError:
-                state_dict = torch.load(self.slice_weights_path, map_location="cpu")
-            state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
-            model.load_state_dict(state_dict)
+            processor = AutoImageProcessor.from_pretrained(
+                self.slice_model_root,
+                local_files_only=True,
+            )
+            model = AutoModelForSemanticSegmentation.from_pretrained(
+                self.slice_model_root,
+                local_files_only=True,
+                use_safetensors=True,
+            )
             model.eval()
             torch.set_num_threads(max(1, min(2, os.cpu_count() or 1)))
+            self._slice_processor = processor
             self._slice_model = model
         return self._slice_model
 
     def _analyze_rgb_array(self, rgb: np.ndarray) -> Tuple[np.ndarray, List[Finding]]:
         import torch
+        import torch.nn.functional as functional
 
+        self._validate_slice_input(rgb)
         resized, scale = self._fit_image(rgb, max_side=1400)
-        tensor, mapping, brain_mask = self._prepare_slice_tensor(resized)
+        model_image, mapping, brain_mask = self._prepare_slice_image(resized)
         model = self._load_slice_model()
+        inputs = self._slice_processor(images=Image.fromarray(model_image), return_tensors="pt")
+        pixel_values = inputs["pixel_values"]
         with self._slice_inference_lock, torch.inference_mode():
-            probability_small = model(tensor)[0, 0].detach().cpu().numpy()
+            logits = model(pixel_values=pixel_values).logits
+            flipped_logits = model(pixel_values=torch.flip(pixel_values, dims=[3])).logits
+            logits = (logits + torch.flip(flipped_logits, dims=[3])) * 0.5
+            logits = functional.interpolate(
+                logits,
+                size=model_image.shape[:2],
+                mode="bilinear",
+                align_corners=False,
+            )
+            probability_small = torch.softmax(logits, dim=1)[0, 1].detach().cpu().numpy()
 
         probability = self._restore_slice_prediction(probability_small, mapping, resized.shape[:2])
-        mask = self._clean_slice_mask(probability >= 0.5, brain_mask)
+        mask = self._clean_slice_mask(probability >= 0.54, brain_mask)
         findings = self._components_to_findings(mask, resized.shape[:2])
-        overlay = self._thermal_overlay(resized, mask)
+        overlay = self._thermal_overlay(resized, mask, probability)
 
         if scale != 1.0:
             findings = [
@@ -357,9 +385,18 @@ class BrainTumorInference:
             ]
         return overlay, findings[:8]
 
-    def _prepare_slice_tensor(self, rgb: np.ndarray):
-        import torch
+    def _validate_slice_input(self, rgb: np.ndarray) -> None:
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ValueError("The submitted image is not a supported RGB MRI view.")
+        if min(rgb.shape[:2]) < 128:
+            raise ValueError("The submitted image is too small for reliable MRI review.")
 
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        low, high = np.percentile(gray, [2, 98])
+        if float(high - low) < 18.0:
+            raise ValueError("The submitted image does not contain enough contrast for reliable MRI review.")
+
+    def _prepare_slice_image(self, rgb: np.ndarray):
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         nonzero = gray[gray > 4]
         threshold = max(6.0, float(np.percentile(nonzero, 12))) if nonzero.size else 6.0
@@ -384,18 +421,7 @@ class BrainTumorInference:
         pad_top = (side - height) // 2
         square = np.zeros((side, side, 3), dtype=np.uint8)
         square[pad_top : pad_top + height, pad_left : pad_left + width] = crop
-        model_image = cv2.resize(square, (256, 256), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-
-        for channel_index in range(3):
-            channel = model_image[:, :, channel_index]
-            lo, hi = np.percentile(channel, [10, 99])
-            if hi <= lo:
-                hi = lo + 1.0
-            channel = np.clip((channel - lo) / (hi - lo), 0.0, 1.0)
-            std = float(channel.std())
-            model_image[:, :, channel_index] = (channel - float(channel.mean())) / max(std, 1e-6)
-
-        tensor = torch.from_numpy(np.moveaxis(model_image, -1, 0)[None]).float()
+        model_image = cv2.resize(square, (512, 512), interpolation=cv2.INTER_AREA)
         mapping = {
             "x": x,
             "y": y,
@@ -405,7 +431,7 @@ class BrainTumorInference:
             "pad_left": pad_left,
             "pad_top": pad_top,
         }
-        return tensor, mapping, brain_mask
+        return model_image, mapping, brain_mask
 
     def _restore_slice_prediction(self, probability: np.ndarray, mapping: Dict[str, int], shape: Tuple[int, int]):
         square = cv2.resize(probability.astype(np.float32), (mapping["side"], mapping["side"]), interpolation=cv2.INTER_LINEAR)
@@ -472,15 +498,8 @@ class BrainTumorInference:
             flair = flair[: minimum[0], : minimum[1], : minimum[2]]
             segmentation = segmentation[: minimum[0], : minimum[1], : minimum[2]]
 
-        tumor_by_slice = np.sum(segmentation > 0, axis=(0, 1))
-        z_index = int(np.argmax(tumor_by_slice)) if np.max(tumor_by_slice) > 0 else flair.shape[2] // 2
-        image = np.rot90(self._normalize_to_uint8(flair[:, :, z_index]))
-        mask = np.rot90(segmentation[:, :, z_index])
-
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        source_rgb = cv2.cvtColor(clahe.apply(image), cv2.COLOR_GRAY2RGB)
-        overlay = self._thermal_overlay(source_rgb, mask > 0)
-        findings = self._components_to_findings(mask > 0, mask.shape)
+        source_rgb, overlay, axial_mask = self._make_volume_montages(flair, segmentation)
+        findings = self._components_to_findings(axial_mask > 0, axial_mask.shape)
 
         subregion_names = []
         for value, label in ((1, "tumor core"), (2, "whole tumor"), (4, "enhancing tumor")):
@@ -490,6 +509,47 @@ class BrainTumorInference:
         source_filename = self._save_overlay(source_rgb, "volume-source", ".png")
         overlay_filename = self._save_overlay(overlay, "volume-segmentation", ".png")
         return source_filename, overlay_filename, findings[:8], subregion_names
+
+    def _make_volume_montages(self, flair: np.ndarray, segmentation: np.ndarray):
+        tumor = segmentation > 0
+        indices = (
+            int(np.argmax(np.sum(tumor, axis=(1, 2)))) if tumor.any() else flair.shape[0] // 2,
+            int(np.argmax(np.sum(tumor, axis=(0, 2)))) if tumor.any() else flair.shape[1] // 2,
+            int(np.argmax(np.sum(tumor, axis=(0, 1)))) if tumor.any() else flair.shape[2] // 2,
+        )
+        views = [
+            ("SAGITTAL", np.rot90(flair[indices[0], :, :]), np.rot90(segmentation[indices[0], :, :])),
+            ("CORONAL", np.rot90(flair[:, indices[1], :]), np.rot90(segmentation[:, indices[1], :])),
+            ("AXIAL", np.rot90(flair[:, :, indices[2]]), np.rot90(segmentation[:, :, indices[2]])),
+        ]
+
+        source_tiles = []
+        overlay_tiles = []
+        axial_mask = views[-1][2]
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        for label, image, mask in views:
+            normalized = clahe.apply(self._normalize_to_uint8(image))
+            source = cv2.cvtColor(normalized, cv2.COLOR_GRAY2RGB)
+            marked = self._thermal_overlay(source, mask > 0)
+            source_tiles.append(self._volume_view_tile(source, label))
+            overlay_tiles.append(self._volume_view_tile(marked, label))
+        return np.hstack(source_tiles), np.hstack(overlay_tiles), axial_mask
+
+    def _volume_view_tile(self, image: np.ndarray, label: str) -> np.ndarray:
+        tile_size = 420
+        height, width = image.shape[:2]
+        scale = min((tile_size - 32) / max(1, width), (tile_size - 32) / max(1, height))
+        resized = cv2.resize(
+            image,
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+        tile = np.full((tile_size + 46, tile_size, 3), (7, 15, 18), dtype=np.uint8)
+        x = (tile_size - resized.shape[1]) // 2
+        y = 46 + (tile_size - resized.shape[0]) // 2
+        tile[y : y + resized.shape[0], x : x + resized.shape[1]] = resized
+        cv2.putText(tile, label, (18, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (201, 226, 222), 2, cv2.LINE_AA)
+        return tile
 
     def _coerce_segmentation_mask(self, segmentation: np.ndarray) -> np.ndarray:
         segmentation = np.squeeze(segmentation)
@@ -514,7 +574,12 @@ class BrainTumorInference:
         label_map[enhancing_tumor] = 4
         return label_map
 
-    def _thermal_overlay(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def _thermal_overlay(
+        self,
+        rgb: np.ndarray,
+        mask: np.ndarray,
+        probability: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         base = cv2.cvtColor(cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray), cv2.COLOR_GRAY2RGB)
         mask_uint = (mask > 0).astype(np.uint8)
@@ -525,7 +590,12 @@ class BrainTumorInference:
         blur_size = max(21, int(smallest_side * 0.055))
         if blur_size % 2 == 0:
             blur_size += 1
-        heat = cv2.GaussianBlur(mask_uint * 255, (blur_size, blur_size), 0)
+        if probability is not None and probability.shape == mask_uint.shape:
+            heat_source = np.clip(probability, 0.0, 1.0) * mask_uint
+            heat_source = (heat_source * 255).astype(np.uint8)
+        else:
+            heat_source = mask_uint * 255
+        heat = cv2.GaussianBlur(heat_source, (blur_size, blur_size), 0)
         heat = cv2.normalize(heat, None, 0, 255, cv2.NORM_MINMAX)
         color_map = getattr(cv2, "COLORMAP_TURBO", cv2.COLORMAP_JET)
         thermal = cv2.cvtColor(cv2.applyColorMap(heat, color_map), cv2.COLOR_BGR2RGB)
@@ -537,23 +607,6 @@ class BrainTumorInference:
         glow_contours, _ = cv2.findContours(glow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(overlay, glow_contours, -1, (255, 102, 46), 5)
         cv2.drawContours(overlay, contours, -1, (255, 245, 214), 2)
-
-        for contour in contours:
-            if cv2.contourArea(contour) < 12:
-                continue
-            x, y, width, height = cv2.boundingRect(contour)
-            label = "Possible tumor focus"
-            label_y = y - 9 if y > 34 else min(overlay.shape[0] - 8, y + height + 27)
-            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 2)
-            box_top = max(0, label_y - text_size[1] - 8)
-            box_right = min(overlay.shape[1] - 1, x + text_size[0] + 12)
-            cv2.rectangle(overlay, (x, box_top), (box_right, min(overlay.shape[0] - 1, label_y + 5)), (20, 29, 34), -1)
-            cv2.putText(overlay, label, (x + 6, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (255, 239, 202), 2, cv2.LINE_AA)
-            corner = min(34, width, height)
-            cv2.line(overlay, (x, y), (x + corner, y), (255, 245, 214), 2)
-            cv2.line(overlay, (x, y), (x, y + corner), (255, 245, 214), 2)
-            cv2.line(overlay, (x + width, y + height), (x + width - corner, y + height), (255, 245, 214), 2)
-            cv2.line(overlay, (x + width, y + height), (x + width, y + height - corner), (255, 245, 214), 2)
         return overlay
 
     def _components_to_findings(self, mask: np.ndarray, shape: Tuple[int, int]) -> List[Finding]:
@@ -660,12 +713,13 @@ class BrainTumorInference:
         exc: Exception,
         model_name: Optional[str] = None,
     ) -> AnalysisResult:
+        LOGGER.error("MRI review failed for %s input: %s", mode, exc)
         return AnalysisResult(
             status="error",
             mode=mode,
             input_type=input_type,
             model_name=model_name or self.quick_model_name,
-            message=f"Unable to complete this review. {exc}",
+            message="Unable to complete this review. Verify that the input is a usable brain MRI study and try again.",
             inference_ms=int((time.time() - started) * 1000),
-            model_loaded=False,
+            model_loaded=self._slice_model is not None,
         )

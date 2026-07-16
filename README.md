@@ -1,10 +1,10 @@
-# NeuroScope MRI
+# CerebraVue MRI
 
-NeuroScope MRI is a Flask web app for brain MRI review. It supports:
+CerebraVue MRI is a Flask research workspace for brain MRI review. It supports:
 
 - 3D multimodal MRI tumor segmentation with the MONAI `brats_mri_segmentation` bundle.
-- Pretrained PyTorch U-Net segmentation for MRI images, sampled video frames, and camera captures.
-- A full-width enterprise reading room with source/result comparison, export, and responsive controls.
+- SegFormer-B2 slice segmentation for MRI images, sampled video frames, and camera captures.
+- A full-screen transparent imaging workstation with source/result comparison, collapsible study controls, export, and responsive review states.
 - One-command Azure deployment through Terraform, AKS, ACR, Azure Files, Log Analytics, Azure Monitor, GitHub Actions, and Jenkins.
 
 This is a research and engineering project, not a medical device. Do not use it for diagnosis without clinical validation and qualified medical review.
@@ -13,7 +13,7 @@ This is a research and engineering project, not a medical device. Do not use it 
 
 The volumetric path uses MONAI Model Zoo's `brats_mri_segmentation` bundle version `0.5.4`. It is designed for four aligned MRI volumes: T1c, T1, T2, and FLAIR, and returns whole-tumor, tumor-core, and enhancing-tumor segmentation.
 
-Image, video, and camera modes use the pretrained U-Net checkpoint from [mateuszbuda/brain-segmentation-pytorch](https://github.com/mateuszbuda/brain-segmentation-pytorch), which was trained for FLAIR abnormality segmentation on the TCIA lower-grade glioma collection. Its architecture and checkpoint are MIT licensed. These modes are slice-level research review only; a random screenshot or camera frame is not sufficient for diagnostic-grade segmentation.
+Image, video, and camera modes use the MIT-licensed [brain MRI SegFormer-B2 checkpoint](https://huggingface.co/kiselyovd/brain-mri-segmentation). It was trained for binary tumor segmentation on lower-grade glioma MRI slices with a patient-level test split. Inference averages original and horizontally mirrored predictions before mask cleanup. These modes are slice-level research review only; scanner protocol differences, screenshots, compression, and camera capture can materially reduce performance.
 
 Both checkpoints are downloaded while the container image is built. They are stored under `/app/models`, outside the Azure Files mount, so every deployed pod starts with the same model artifacts and does not download them during a request.
 
@@ -29,6 +29,14 @@ python app.py
 ```
 
 Open `http://127.0.0.1:5000`.
+
+To preview only the interface without installing Python or the model packages:
+
+```bash
+node scripts/ui_preview_server.mjs
+```
+
+Open `http://127.0.0.1:5080`. Analysis endpoints are intentionally unavailable in this lightweight preview.
 
 To download both trained model packages locally:
 
@@ -59,7 +67,7 @@ Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal 
 }
 ```
 
-Then run the `Deploy NeuroScope MRI to Azure` workflow, or push to `main`.
+Then run the existing Azure deployment workflow, or push to `main`.
 
 The workflow automatically:
 
@@ -78,12 +86,16 @@ The included `Jenkinsfile` runs the same deployment script. Jenkins cannot read 
 
 - Azure Kubernetes Service for the running app.
 - Azure Container Registry for container images.
-- Azure Files for persistent uploads, generated overlays, and model cache.
+- Azure Files for generated review images and temporary application storage. Model checkpoints are baked into the container image.
 - Log Analytics Workspace for Azure Monitor Container Insights.
 - Application Insights workspace resource for web monitoring expansion.
 - Terraform backend storage account and container.
 
 Azure Container Service (ACS) is retired; this project uses AKS, the supported Azure Kubernetes platform.
+
+## Hospital Pilot Boundary
+
+This repository is not a cleared medical device and must not be used for autonomous diagnosis. Before any hospital pilot, validate it on local scanner protocols and patient populations, perform radiologist acceptance testing, complete privacy and security review, define retention and audit policies, and obtain the regulatory approval required in the deployment jurisdiction. A browser camera is a live-frame review source, not a direct MRI scanner connection. Direct scanner or PACS ingestion requires a separately configured DICOM/DICOMweb gateway and hospital network integration.
 
 ## Monitoring
 

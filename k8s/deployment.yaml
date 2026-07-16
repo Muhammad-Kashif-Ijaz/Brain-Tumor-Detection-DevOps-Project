@@ -55,10 +55,11 @@ spec:
               value: /app/instance/results
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
-            initialDelaySeconds: 12
+            initialDelaySeconds: 20
             periodSeconds: 10
+            failureThreshold: 18
           livenessProbe:
             httpGet:
               path: /healthz
@@ -67,7 +68,7 @@ spec:
             periodSeconds: 20
           startupProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             failureThreshold: 30
             periodSeconds: 10

@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -11,10 +12,8 @@ MONAI_MODEL_SHA256 = "860ccb3f1c21c99d0410ad8a1ac4ef6b8fab60cec0a503b0ba42675741
 MONAI_BASE_URL = (
     f"https://huggingface.co/MONAI/{MONAI_BUNDLE}/resolve/{MONAI_REVISION}/"
 )
-SLICE_MODEL_URL = (
-    "https://github.com/mateuszbuda/brain-segmentation-pytorch/"
-    "releases/download/v1.0/unet-e012d006.pt"
-)
+SLICE_MODEL_REPO = "kiselyovd/brain-mri-segmentation"
+SLICE_MODEL_REVISION = "a813637"
 
 
 def sha256_file(path: Path) -> str:
@@ -45,7 +44,7 @@ def download_file(
     temporary = destination.with_suffix(destination.suffix + ".part")
     for attempt in range(3):
         try:
-            request = Request(url, headers={"User-Agent": "NeuroScope-model-builder/1.0"})
+            request = Request(url, headers={"User-Agent": "CerebraVue-model-builder/1.0"})
             with urlopen(request, timeout=120) as response, temporary.open("wb") as output:
                 while True:
                     chunk = response.read(1024 * 1024)
@@ -87,15 +86,32 @@ def download_monai_bundle(bundle_dir: Path):
     )
 
 
+def download_slice_model(bundle_dir: Path):
+    from huggingface_hub import snapshot_download
+
+    destination = bundle_dir / "brain_mri_segformer"
+    snapshot_download(
+        repo_id=SLICE_MODEL_REPO,
+        revision=SLICE_MODEL_REVISION,
+        local_dir=destination,
+        allow_patterns=[
+            "config.json",
+            "preprocessor_config.json",
+            "model.safetensors",
+            "README.md",
+        ],
+    )
+    checkpoint = destination / "model.safetensors"
+    if not checkpoint.exists() or checkpoint.stat().st_size < 90_000_000:
+        raise RuntimeError("The MRI slice checkpoint did not download correctly.")
+    shutil.rmtree(destination / ".cache", ignore_errors=True)
+
+
 def main():
     bundle_dir = Path(os.getenv("MODEL_BUNDLE_DIR", "models"))
     bundle_dir.mkdir(parents=True, exist_ok=True)
     download_monai_bundle(bundle_dir)
-    download_file(
-        SLICE_MODEL_URL,
-        bundle_dir / "lgg_unet" / "unet.pt",
-        minimum_size=1_000_000,
-    )
+    download_slice_model(bundle_dir)
 
 
 if __name__ == "__main__":

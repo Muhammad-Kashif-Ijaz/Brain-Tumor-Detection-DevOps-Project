@@ -1,0 +1,72 @@
+name: Model Container Smoke Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  model-ready:
+    name: Verify trained model container
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build the pinned model image
+        run: docker build --progress=plain --tag cerebravue-model-smoke:${{ github.sha }} .
+
+      - name: Start the application
+        run: |
+          docker run --detach --rm --name cerebravue-model-smoke --publish 5000:5000 \
+            cerebravue-model-smoke:${{ github.sha }}
+
+      - name: Require the trained checkpoint to load
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error --max-time 25 http://127.0.0.1:5000/readyz > ready.json; then
+              cat ready.json
+              python -c "import json; payload = json.load(open('ready.json')); assert payload['slice_model_ready'] is True, payload"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "The trained model did not become ready."
+          exit 1
+
+      - name: Exercise one segmentation request
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          width = height = 320
+          pixels = bytearray()
+          for y in range(height):
+              for x in range(width):
+                  horizontal = (x - width / 2) / (width * 0.39)
+                  vertical = (y - height / 2) / (height * 0.44)
+                  radius = horizontal * horizontal + vertical * vertical
+                  value = 8 if radius > 1 else int(72 + (1 - radius) * 128)
+                  pixels.extend((value, value, value))
+          Path('/tmp/mri-smoke.png').write_bytes(
+              f'P6\n{width} {height}\n255\n'.encode() + bytes(pixels)
+          )
+          PY
+          curl --fail --silent --show-error \
+            --form "scan=@/tmp/mri-smoke.png;type=image/png" \
+            http://127.0.0.1:5000/api/analyze > result.json
+          cat result.json
+          python -c "import json; payload = json.load(open('result.json')); assert payload['status'] == 'ok', payload; assert payload.get('overlay_url'), payload"
+
+      - name: Show diagnostics when a check fails
+        if: failure()
+        run: docker logs cerebravue-model-smoke || true

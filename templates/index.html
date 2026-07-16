@@ -3,314 +3,236 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#13252b">
-    <title>NeuroScope MRI Review</title>
+    <meta name="theme-color" content="#f5fafb">
     <meta
       name="description"
-      content="Enterprise brain MRI review workspace with side-by-side source and thermal segmentation views."
+      content="CerebraVue is a clinician-led brain MRI review workspace that produces a thermal segmentation overlay for submitted imaging."
     >
+    <title>CerebraVue | Brain MRI Review</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap"
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap"
       rel="stylesheet"
     >
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v={{ asset_version }}">
   </head>
   <body>
-    <div class="application" id="application">
-      <header class="global-header">
-        <a class="brand" href="/" aria-label="NeuroScope MRI home">
-          <span class="brand-symbol" aria-hidden="true">
-            <i></i>
-          </span>
-          <span class="brand-copy">
-            <strong>NeuroScope</strong>
-            <small>MRI Review Workspace</small>
-          </span>
-        </a>
+    <div class="page-noise" aria-hidden="true"></div>
 
-        <div class="header-context" aria-label="Application status">
-          <span class="environment-label">Clinical research environment</span>
-          <span class="service-status"><i></i> Service online</span>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="CerebraVue home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" fill="none">
+            <path d="M24 5.5c-9.7 0-17.5 7.8-17.5 17.5S14.3 40.5 24 40.5 41.5 32.7 41.5 23 33.7 5.5 24 5.5Z"/>
+            <path d="M24 12.5c-4.8 0-8.5 3.9-8.5 8.7 0 5 3.6 8.3 8.5 8.3M24 12.5c4.8 0 8.5 3.9 8.5 8.7 0 5-3.6 8.3-8.5 8.3M24 12.5v17M12 24h24"/>
+            <circle cx="18.2" cy="19" r="1.8"/>
+            <circle cx="29.8" cy="27" r="1.8"/>
+          </svg>
+        </span>
+        <span>
+          <strong>CerebraVue</strong>
+          <small>Brain MRI review</small>
+        </span>
+      </a>
+
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="#scan">Scan</a>
+        <a href="#about">About</a>
+        <a href="#guidance">Guidance</a>
+      </nav>
+
+      <button class="header-action" id="newStudy" type="button">New scan</button>
+    </header>
+
+    <main id="top">
+      <section class="intro section-shell" aria-labelledby="introTitle">
+        <div class="intro-copy">
+          <p class="eyebrow"><span></span> Clinician-led MRI review</p>
+          <h1 id="introTitle">A clear view for brain MRI review.</h1>
+          <p class="intro-text">
+            Upload a brain MRI image or video and compare the original study with a thermal map of possible tumor regions.
+          </p>
         </div>
+        <p class="intro-note">Made for image review. Final interpretation remains with a qualified clinician.</p>
+      </section>
 
-        <button class="header-command" id="newStudy" type="button">
-          <span aria-hidden="true">+</span>
-          New study
-        </button>
-      </header>
-
-      <div class="workspace-shell">
-        <aside class="acquisition-rail" aria-label="Study acquisition">
-          <div class="rail-intro">
-            <p class="section-label">Study acquisition</p>
-            <h2>Load a brain MRI</h2>
-            <p>Choose a source and prepare it for side-by-side clinical review.</p>
+      <section class="scan-section section-shell" id="scan" aria-labelledby="scanTitle">
+        <header class="section-heading">
+          <div>
+            <p class="eyebrow"><span></span> MRI analysis</p>
+            <h2 id="scanTitle">Review an examination</h2>
           </div>
+          <p id="scanState" class="scan-state" role="status">Ready for an image</p>
+        </header>
 
-          <div class="mode-tabs" role="tablist" aria-label="Study source">
-            <button class="mode-tab active" type="button" data-mode="single" role="tab" aria-selected="true">
-              Image
-            </button>
-            <button class="mode-tab" type="button" data-mode="volume" role="tab" aria-selected="false">
-              Volume
-            </button>
-            <button class="mode-tab" type="button" data-mode="live" role="tab" aria-selected="false">
-              Camera
-            </button>
-          </div>
+        <div class="scan-layout">
+          <form class="upload-panel glass-panel" id="singleForm" novalidate>
+            <div class="panel-intro">
+              <p class="panel-label">Step 1</p>
+              <h3>Add an MRI study</h3>
+              <p>Use a single MRI image or a short MRI video. The original stays visible beside the marked result.</p>
+            </div>
 
-          <form class="mode-pane active" id="singleForm" data-pane="single">
-            <label class="dropzone" id="dropzone">
-              <input id="scanInput" name="scan" type="file" accept="image/*,video/*">
-              <span class="dropzone-graphic" aria-hidden="true"><i></i></span>
-              <strong id="singleFileName">Choose or drop an MRI study</strong>
-              <small>Brain MRI images and review videos</small>
-              <span class="browse-label">Browse files</span>
+            <label class="dropzone" id="dropzone" for="scanInput">
+              <input id="scanInput" name="scan" type="file" accept="image/*,video/*,.tif,.tiff">
+              <span class="upload-symbol" aria-hidden="true">
+                <i></i><i></i><i></i>
+              </span>
+              <strong id="singleFileName">Drop an MRI image here</strong>
+              <small>PNG, JPG, TIFF, WEBP, MP4 or MOV</small>
+              <span class="browse-file">Choose file</span>
             </label>
-            <button class="primary-command" type="submit">
-              Analyze study
-              <span aria-hidden="true">&#8594;</span>
-            </button>
+
+            <div class="source-line" aria-live="polite">
+              <span class="source-dot" aria-hidden="true"></span>
+              <span id="sourceStatus">No study selected</span>
+            </div>
+
+            <button class="primary-button" id="analyzeButton" type="submit">Analyze MRI</button>
+
+            <p class="data-note">Source files are used only to prepare this review result.</p>
           </form>
 
-          <form class="mode-pane volume-form" id="volumeForm" data-pane="volume">
-            <p class="pane-guidance">Add four aligned NIfTI series from the same examination.</p>
-            <label class="series-field">
-              <span><strong>T1c</strong><small>Post-contrast</small></span>
-              <input name="t1c" type="file" accept=".nii,.nii.gz,.gz">
-            </label>
-            <label class="series-field">
-              <span><strong>T1</strong><small>Anatomical</small></span>
-              <input name="t1" type="file" accept=".nii,.nii.gz,.gz">
-            </label>
-            <label class="series-field">
-              <span><strong>T2</strong><small>Fluid sensitive</small></span>
-              <input name="t2" type="file" accept=".nii,.nii.gz,.gz">
-            </label>
-            <label class="series-field">
-              <span><strong>FLAIR</strong><small>Lesion contrast</small></span>
-              <input name="flair" type="file" accept=".nii,.nii.gz,.gz">
-            </label>
-            <button class="primary-command" type="submit">
-              Analyze volume
-              <span aria-hidden="true">&#8594;</span>
-            </button>
-          </form>
-
-          <section class="mode-pane live-pane" id="livePane" data-pane="live">
-            <div class="camera-frame">
-              <video id="cameraFeed" autoplay playsinline muted></video>
-              <canvas id="captureCanvas" hidden></canvas>
-              <div class="camera-empty" id="cameraEmpty">
-                <span class="camera-reticle" aria-hidden="true"></span>
-                <strong>Camera preview</strong>
+          <section class="imaging-panel glass-panel" id="viewerPanel" aria-labelledby="viewerTitle">
+            <header class="imaging-header">
+              <div>
+                <p class="panel-label">Step 2</p>
+                <h3 id="viewerTitle">Source and thermal review</h3>
               </div>
-            </div>
-            <input id="cameraCaptureInput" type="file" accept="image/*" capture="environment" hidden>
-            <p class="camera-help" id="cameraHelp">Start a secure live preview or capture a frame from this device.</p>
-            <div class="camera-actions">
-              <button class="secondary-command" id="startCamera" type="button">Start camera</button>
-              <button class="primary-command compact" id="captureFrame" type="button">Analyze frame</button>
-            </div>
-          </section>
-
-          <section class="study-readiness" aria-label="Study readiness">
-            <div class="readiness-heading">
-              <span>Review readiness</span>
-              <strong id="metricStatus">Ready</strong>
-            </div>
-            <div class="readiness-item">
-              <i></i>
-              <span><strong>Source</strong><small id="sourceStatus">No study loaded</small></span>
-            </div>
-            <div class="readiness-item">
-              <i></i>
-              <span><strong>Thermal result</strong><small id="resultStatus">Awaiting analysis</small></span>
-            </div>
-          </section>
-
-          <div class="rail-safety">
-            <span aria-hidden="true">!</span>
-            <p>Research review aid. A qualified clinician must provide the final interpretation.</p>
-          </div>
-        </aside>
-
-        <main class="reading-room">
-          <header class="reading-header">
-            <div>
-              <p class="section-label">Diagnostic reading room</p>
-              <h1>Brain MRI tumor review</h1>
-              <p>Inspect the source study beside a clearly marked thermal segmentation view.</p>
-            </div>
-            <div class="reading-actions">
-              <button class="secondary-command slim" id="focusViewer" type="button">Focus viewer</button>
-              <a class="primary-command slim disabled" id="downloadResult" href="#" aria-disabled="true">Export result</a>
-            </div>
-          </header>
-
-          <section class="study-ribbon" aria-label="Current study status">
-            <article>
-              <span>Current study</span>
-              <strong id="viewerTitle">Unassigned MRI</strong>
-            </article>
-            <article>
-              <span>Review state</span>
-              <strong id="scanChip"><i></i> Ready for acquisition</strong>
-            </article>
-            <article>
-              <span>Thermal overlay</span>
-              <strong id="metricRegions">Not generated</strong>
-            </article>
-            <article>
-              <span>Next action</span>
-              <strong id="metricLatency">Load a study</strong>
-            </article>
-          </section>
-
-          <section class="viewer-panel" id="viewerPanel" aria-label="MRI comparison viewer">
-            <div class="viewer-toolbar">
-              <div class="viewer-title">
-                <span class="viewer-status-dot" aria-hidden="true"></span>
-                <div>
-                  <small>Review viewport</small>
-                  <strong>Source and thermal segmentation</strong>
-                </div>
-              </div>
-              <div class="viewer-controls" role="group" aria-label="Viewer layout">
-                <button class="view-mode active" type="button" data-view="compare">Compare</button>
-                <button class="view-mode" type="button" data-view="result">Thermal only</button>
-              </div>
-            </div>
+              <span class="review-pill" id="resultStatus">Awaiting study</span>
+            </header>
 
             <div class="comparison-grid" id="comparisonGrid">
-              <article class="viewport original-view">
-                <div class="viewport-label">
-                  <span>Source study</span>
-                  <strong>Original MRI</strong>
-                </div>
-                <div class="scan-stage" id="sourceStage">
-                  <img id="sourceImage" alt="Original MRI study" hidden>
+              <figure class="scan-frame source-frame">
+                <figcaption>
+                  <span>Original MRI</span>
+                  <small id="sourceCaption">Source view</small>
+                </figcaption>
+                <div class="image-stage" id="sourceStage">
+                  <img id="sourceImage" alt="Original uploaded MRI study" hidden>
                   <video id="sourceVideo" controls muted playsinline hidden></video>
                   <div class="stage-empty" id="sourceEmpty">
-                    <span class="empty-scan" aria-hidden="true"><i></i></span>
-                    <strong>Source viewport</strong>
-                    <small>The original study will remain visible for comparison.</small>
+                    <span class="frame-lines" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <strong>Original study</strong>
+                    <small>Your uploaded MRI will appear here.</small>
                   </div>
-                  <span class="viewport-corner top-left" aria-hidden="true"></span>
-                  <span class="viewport-corner bottom-right" aria-hidden="true"></span>
+                  <span class="frame-corner top-left" aria-hidden="true"></span>
+                  <span class="frame-corner bottom-right" aria-hidden="true"></span>
                 </div>
-              </article>
+              </figure>
 
-              <article class="viewport result-view">
-                <div class="viewport-label thermal-label">
-                  <span>Assisted review</span>
-                  <strong>Thermal tumor map</strong>
-                </div>
-                <div class="scan-stage thermal-stage" id="resultStage">
-                  <canvas id="mriCanvas" width="1000" height="780" aria-label="Animated MRI scanner ready view"></canvas>
-                  <img id="resultImage" alt="MRI with possible tumor regions marked by a thermal overlay" hidden>
-                  <div class="scan-beam" aria-hidden="true"></div>
-                  <div class="processing-label" id="processingLabel" hidden>
-                    <span></span>
-                    Reviewing MRI study
+              <figure class="scan-frame result-frame">
+                <figcaption>
+                  <span>Thermal result</span>
+                  <small>Possible region overlay</small>
+                </figcaption>
+                <div class="image-stage" id="resultStage">
+                  <canvas id="mriCanvas" width="840" height="660" aria-label="MRI review animation"></canvas>
+                  <img id="resultImage" alt="MRI with possible tumor regions highlighted with a thermal overlay" hidden>
+                  <div class="result-empty" id="resultEmpty">
+                    <span class="thermal-rings" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <strong>Thermal result</strong>
+                    <small>The marked review image will appear here.</small>
                   </div>
-                  <span class="viewport-corner top-left" aria-hidden="true"></span>
-                  <span class="viewport-corner bottom-right" aria-hidden="true"></span>
+                  <div class="processing-state" id="processingLabel" hidden>
+                    <span class="processing-spinner" aria-hidden="true"></span>
+                    <strong>Preparing thermal map</strong>
+                    <small>Reviewing the submitted image</small>
+                  </div>
+                  <span class="frame-corner top-left" aria-hidden="true"></span>
+                  <span class="frame-corner bottom-right" aria-hidden="true"></span>
                 </div>
-              </article>
+              </figure>
             </div>
 
-            <div class="viewer-foot">
-              <div class="thermal-legend" aria-label="Thermal overlay legend">
-                <span>Overlay</span>
-                <i></i>
-                <small>Review focus</small>
+            <div class="result-summary" aria-live="polite">
+              <div>
+                <p class="panel-label">Review note</p>
+                <p id="resultNarrative">Add a study to create a thermal review image.</p>
               </div>
-              <div class="case-progress" aria-label="Analysis progress">
-                <span class="progress-step active" id="stageAcquire"><i></i>Acquire</span>
-                <span class="progress-line"></span>
-                <span class="progress-step" id="stageAnalyze"><i></i>Analyze</span>
-                <span class="progress-line"></span>
-                <span class="progress-step" id="stageReview"><i></i>Review</span>
-              </div>
+              <a class="download-button is-disabled" id="downloadResult" href="#" aria-disabled="true">Download result</a>
             </div>
           </section>
+        </div>
+      </section>
 
-          <section class="clinical-strip" aria-label="Review principles">
-            <article>
-              <span class="strip-index">A</span>
-              <div><strong>Preserve the source</strong><small>Every mark is reviewed against the original study.</small></div>
-            </article>
-            <article>
-              <span class="strip-index">B</span>
-              <div><strong>Map the full focus</strong><small>Separate regions remain visible in the returned image.</small></div>
-            </article>
-            <article>
-              <span class="strip-index">C</span>
-              <div><strong>Confirm clinically</strong><small>Findings support review and do not replace diagnosis.</small></div>
-            </article>
-          </section>
-        </main>
+      <section class="live-section section-shell" id="live" aria-labelledby="liveTitle">
+        <div class="live-copy">
+          <p class="eyebrow"><span></span> Device capture</p>
+          <h2 id="liveTitle">Use a camera when a file is not available.</h2>
+          <p>
+            Start a local camera preview, capture a frame, and send it through the same review flow. A browser camera cannot acquire an MRI; use it only for an image or display capture.
+          </p>
+        </div>
 
-        <aside class="findings-panel" aria-label="Study findings">
-          <header class="findings-header">
-            <div>
-              <p class="section-label">Interpretation</p>
-              <h2>Review summary</h2>
+        <section class="camera-panel glass-panel" aria-label="Camera capture">
+          <div class="camera-stage">
+            <video id="cameraFeed" autoplay playsinline muted></video>
+            <canvas id="captureCanvas" hidden></canvas>
+            <div class="camera-empty" id="cameraEmpty">
+              <span class="camera-mark" aria-hidden="true"><i></i></span>
+              <strong>Camera is off</strong>
+              <small>Start a secure local preview to capture a frame.</small>
             </div>
-            <span class="case-state" id="boardState">Open</span>
-          </header>
+            <span class="camera-indicator" id="liveIndicator"><i></i> Standby</span>
+          </div>
+          <input id="cameraCaptureInput" type="file" accept="image/*" capture="environment" hidden>
+          <div class="camera-controls">
+            <button class="secondary-button" id="startCamera" type="button">Start camera</button>
+            <button class="primary-button" id="captureFrame" type="button" disabled>Analyze frame</button>
+          </div>
+          <label class="continuous-control">
+            <input id="continuousToggle" type="checkbox">
+            <span class="switch" aria-hidden="true"><i></i></span>
+            <span>Continue reviewing camera frames</span>
+          </label>
+          <p class="camera-help" id="cameraHelp">Camera capture is available on secure or local connections.</p>
+        </section>
+      </section>
 
-          <section class="narrative-block">
-            <span>Current impression</span>
-            <strong id="resultNarrative">Load a study to begin the review.</strong>
-          </section>
+      <section class="about-section section-shell" id="about" aria-labelledby="aboutTitle">
+        <header class="about-heading">
+          <p class="eyebrow"><span></span> Focused by design</p>
+          <h2 id="aboutTitle">Everything needed for a clear first review.</h2>
+        </header>
+        <div class="about-grid">
+          <article>
+            <span>01</span>
+            <h3>Original preserved</h3>
+            <p>Keep the submitted study beside the thermal image so the marked region can be checked in context.</p>
+          </article>
+          <article>
+            <span>02</span>
+            <h3>Visible result</h3>
+            <p>Possible regions are shown directly on the returned image rather than hidden behind technical scores.</p>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>Clinician in control</h3>
+            <p>Use the result as a review aid alongside full imaging, history, and qualified clinical judgement.</p>
+          </article>
+        </div>
+      </section>
 
-          <section class="finding-section">
-            <div class="section-heading">
-              <span>Marked regions</span>
-              <strong id="boardBoundary">Pending</strong>
-            </div>
-            <div class="result-feed" id="resultFeed">
-              <article class="finding-card empty">
-                <span class="finding-marker"></span>
-                <div>
-                  <strong>No study loaded</strong>
-                  <p>Possible tumor locations will appear here after analysis.</p>
-                </div>
-              </article>
-            </div>
-          </section>
+      <section class="guidance-section" id="guidance" aria-labelledby="guidanceTitle">
+        <div class="section-shell guidance-content">
+          <p class="eyebrow"><span></span> Important guidance</p>
+          <h2 id="guidanceTitle">A review aid, not a standalone diagnosis.</h2>
+          <p>
+            CerebraVue can help surface possible regions for inspection. Results must be verified with the complete MRI study and interpreted by an appropriately qualified healthcare professional.
+          </p>
+        </div>
+      </section>
+    </main>
 
-          <section class="region-summary">
-            <div class="section-heading">
-              <span>Study detail</span>
-              <strong id="boardLocation">Awaiting study</strong>
-            </div>
-            <div class="subregion-list" id="subregionList">
-              <span>Source not reviewed</span>
-            </div>
-          </section>
-
-          <section class="review-checklist">
-            <div class="section-heading">
-              <span>Review checklist</span>
-              <strong>Clinician</strong>
-            </div>
-            <label><input type="checkbox"><span>Source and overlay compared</span></label>
-            <label><input type="checkbox"><span>Clinical context reviewed</span></label>
-            <label><input type="checkbox"><span>Final interpretation recorded</span></label>
-          </section>
-
-          <section class="review-note">
-            <span>Clinical boundary</span>
-            <p>Results are intended for research and assisted review. They are not a medical diagnosis.</p>
-          </section>
-        </aside>
+    <footer class="site-footer section-shell">
+      <div class="footer-brand">
+        <strong>CerebraVue</strong>
+        <span>Brain MRI review workspace</span>
       </div>
-    </div>
+      <p>For validation and clinician-led review.</p>
+    </footer>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="{{ url_for('static', filename='js/app.js') }}?v={{ asset_version }}"></script>
