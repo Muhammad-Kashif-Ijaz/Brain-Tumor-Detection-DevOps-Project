@@ -3,7 +3,7 @@
 CerebraVue MRI is a Flask research workspace for brain MRI review. It supports:
 
 - 3D multimodal MRI tumor segmentation with the MONAI `brats_mri_segmentation` bundle.
-- SegFormer-B2 slice segmentation for MRI images, sampled video frames, and camera captures.
+- SegFormer-B2 slice segmentation for MRI images, clearly separated multi-view image sheets, sampled video frames, and camera captures.
 - A full-screen transparent imaging workstation with source/result comparison, collapsible study controls, export, and responsive review states.
 - One-command Azure deployment through Terraform, AKS, ACR, Azure Files, Log Analytics, Azure Monitor, GitHub Actions, and Jenkins.
 
@@ -11,9 +11,13 @@ This is a research and engineering project, not a medical device. Do not use it 
 
 ## Model
 
-The volumetric path uses MONAI Model Zoo's `brats_mri_segmentation` bundle version `0.5.4`. It is designed for four aligned MRI volumes: T1c, T1, T2, and FLAIR, and returns whole-tumor, tumor-core, and enhancing-tumor segmentation.
+The volumetric path uses MONAI Model Zoo's `brats_mri_segmentation` bundle version `0.5.4`. It is designed for four aligned MRI volumes: T1c, T1, T2, and FLAIR, and returns whole-tumor, tumor-core, and enhancing-tumor segmentation. This is the appropriate route when coverage across the whole scan and all anatomical planes matters. The bundled review image contains sagittal, coronal, axial, and all-detected-regions overview panels; the overview preserves every voxel region segmented by the model in the submitted volume.
+
+The MONAI bundle documentation reports validation Dice values of 0.8559 for tumor core, 0.9026 for whole tumor, and 0.7905 for enhancing tumor on its BraTS 2018 validation data. Those are dataset-specific research measurements, not a guarantee for a different scanner, population, tumor type, or clinical workflow.
 
 Image, video, and camera modes use the MIT-licensed [brain MRI SegFormer-B2 checkpoint](https://huggingface.co/kiselyovd/brain-mri-segmentation). It was trained for binary tumor segmentation on lower-grade glioma MRI slices with a patient-level test split. Inference averages original and horizontally mirrored predictions before mask cleanup. These modes are slice-level research review only; scanner protocol differences, screenshots, compression, and camera capture can materially reduce performance.
+
+When a single uploaded image contains up to four clearly separated MRI views, the application detects the panel gutters, reviews each panel independently, and returns one labeled thermal contact sheet. This is a convenience feature for MRI image sheets; it does not turn a screenshot into a full volumetric examination. Brain X-rays are not a supported tumor-segmentation input because they do not provide the soft-tissue information required for reliable tumor localization.
 
 Both checkpoints are downloaded while the container image is built. They are stored under `/app/models`, outside the Azure Files mount, so every deployed pod starts with the same model artifacts and does not download them during a request.
 
@@ -67,7 +71,7 @@ Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal 
 }
 ```
 
-Then run the existing Azure deployment workflow, or push to `main`.
+Then push to `main`. The model container smoke test builds the image, requires the trained slice checkpoint to load, and exercises both single-view and multi-view MRI uploads. Azure deployment starts only after that check succeeds. You can still use the manual deployment workflow when needed.
 
 The workflow automatically:
 

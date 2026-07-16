@@ -122,7 +122,36 @@ class BrainTumorInference:
         started = time.time()
         try:
             rgb = np.array(Image.open(file_path).convert("RGB"))
-            overlay, findings = self._analyze_rgb_array(rgb)
+            panels = self._split_composite_mri_panels(rgb)
+            reviewed_panels = []
+            findings: List[Finding] = []
+            for index, panel in enumerate(panels, start=1):
+                overlay, panel_findings = self._analyze_rgb_array(panel)
+                reviewed_panels.append((f"MRI VIEW {index}", panel, overlay))
+                for finding in panel_findings:
+                    findings.append(
+                        Finding(
+                            label=f"possible tumor region in MRI view {index}",
+                            confidence=finding.confidence,
+                            x=finding.x,
+                            y=finding.y,
+                            width=finding.width,
+                            height=finding.height,
+                            area_ratio=finding.area_ratio,
+                        )
+                    )
+
+            source_filename = None
+            if len(reviewed_panels) > 1:
+                source_filename = self._save_overlay(
+                    self._make_study_contact_sheet([(label, source) for label, source, _ in reviewed_panels]),
+                    f"{file_path.stem}-source",
+                    ".jpg",
+                )
+                overlay = self._make_study_contact_sheet([(label, marked) for label, _, marked in reviewed_panels])
+            else:
+                overlay = reviewed_panels[0][2]
+
             filename = self._save_overlay(overlay, file_path.stem, ".jpg")
             return AnalysisResult(
                 status="ok",
@@ -132,10 +161,11 @@ class BrainTumorInference:
                 message=self._slice_mode_message(findings),
                 inference_ms=int((time.time() - started) * 1000),
                 model_loaded=True,
+                source_preview_filename=source_filename,
                 overlay_filename=filename,
-                findings=findings,
+                findings=findings[:12],
                 details={
-                    "review_scope": "single MRI slice",
+                    "review_scope": "single MRI slice" if len(panels) == 1 else f"{len(panels)} MRI views in one image",
                     "recommended_mode": "Use aligned T1c, T1, T2, and FLAIR volumes for volumetric segmentation.",
                 },
             )
@@ -208,6 +238,19 @@ class BrainTumorInference:
                 model_loaded=self._monai_bundle_ready(),
             )
 
+        try:
+            self._validate_multimodal_study(modality_paths)
+        except ValueError as exc:
+            return AnalysisResult(
+                status="invalid-inputs",
+                mode="3d-mri",
+                input_type="nifti",
+                model_name="MONAI BraTS MRI segmentation",
+                message=str(exc),
+                inference_ms=int((time.time() - started) * 1000),
+                model_loaded=self._monai_bundle_ready(),
+            )
+
         if not self._ensure_monai_bundle():
             return AnalysisResult(
                 status="model-not-ready",
@@ -272,7 +315,7 @@ class BrainTumorInference:
                 details={
                     "modalities": ["T1c", "T1", "T2", "FLAIR"],
                     "subregions": subregions,
-                    "planes": ["sagittal", "coronal", "axial"],
+                    "planes": ["sagittal", "coronal", "axial", "all-regions overview"],
                     "review_scope": "aligned multimodal MRI volume",
                 },
             )
@@ -478,6 +521,30 @@ class BrainTumorInference:
         datalist_path.write_text(json.dumps({"testing": [{"image": ordered}]}), encoding="utf-8")
         return datalist_path
 
+    def _validate_multimodal_study(self, modality_paths: Dict[str, Path]) -> None:
+        try:
+            import nibabel as nib
+        except ImportError as exc:
+            raise ValueError("The NIfTI validation component is unavailable in this deployment.") from exc
+
+        reference_shape = None
+        reference_affine = None
+        for name in ("t1c", "t1", "t2", "flair"):
+            try:
+                image = nib.load(str(modality_paths[name]))
+            except Exception as exc:
+                raise ValueError("One or more NIfTI MRI sequences could not be read.") from exc
+            if len(image.shape) != 3:
+                raise ValueError("Each MRI sequence must be one three-dimensional NIfTI volume.")
+            if min(image.shape) < 32:
+                raise ValueError("The submitted MRI volume is too small for volumetric review.")
+            if reference_shape is None:
+                reference_shape = image.shape
+                reference_affine = image.affine
+                continue
+            if image.shape != reference_shape or not np.allclose(image.affine, reference_affine, atol=1e-3):
+                raise ValueError("The four MRI sequences must have matching dimensions and spatial alignment.")
+
     def _find_segmentation(self, output_dir: Path) -> Path:
         candidates = sorted(output_dir.rglob("*.nii*"), key=lambda path: path.stat().st_mtime, reverse=True)
         for path in candidates:
@@ -498,8 +565,8 @@ class BrainTumorInference:
             flair = flair[: minimum[0], : minimum[1], : minimum[2]]
             segmentation = segmentation[: minimum[0], : minimum[1], : minimum[2]]
 
-        source_rgb, overlay, axial_mask = self._make_volume_montages(flair, segmentation)
-        findings = self._components_to_findings(axial_mask > 0, axial_mask.shape)
+        source_rgb, overlay, overview_mask = self._make_volume_montages(flair, segmentation)
+        findings = self._components_to_findings(overview_mask > 0, overview_mask.shape)
 
         subregion_names = []
         for value, label in ((1, "tumor core"), (2, "whole tumor"), (4, "enhancing tumor")):
@@ -523,9 +590,14 @@ class BrainTumorInference:
             ("AXIAL", np.rot90(flair[:, :, indices[2]]), np.rot90(segmentation[:, :, indices[2]])),
         ]
 
+        # This projection preserves every segmented location, including lesions
+        # outside the three representative cross-sectional slices above.
+        overview_image = np.rot90(np.max(flair, axis=2))
+        overview_mask = np.rot90(np.max(segmentation, axis=2))
+        views.append(("ALL DETECTED REGIONS", overview_image, overview_mask))
+
         source_tiles = []
         overlay_tiles = []
-        axial_mask = views[-1][2]
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         for label, image, mask in views:
             normalized = clahe.apply(self._normalize_to_uint8(image))
@@ -533,7 +605,7 @@ class BrainTumorInference:
             marked = self._thermal_overlay(source, mask > 0)
             source_tiles.append(self._volume_view_tile(source, label))
             overlay_tiles.append(self._volume_view_tile(marked, label))
-        return np.hstack(source_tiles), np.hstack(overlay_tiles), axial_mask
+        return np.hstack(source_tiles), np.hstack(overlay_tiles), overview_mask
 
     def _volume_view_tile(self, image: np.ndarray, label: str) -> np.ndarray:
         tile_size = 420
@@ -658,6 +730,75 @@ class BrainTumorInference:
         scale = max_side / float(largest)
         return cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA), scale
 
+    def _split_composite_mri_panels(self, rgb: np.ndarray) -> List[np.ndarray]:
+        """Split a clearly separated MRI contact sheet without guessing a grid."""
+        height, width = rgb.shape[:2]
+        if min(height, width) < 256:
+            return [rgb]
+
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        x_cuts = self._panel_gutter_cuts(gray, axis=0)
+        y_cuts = self._panel_gutter_cuts(gray, axis=1)
+        if not x_cuts and not y_cuts:
+            return [rgb]
+
+        x_edges = [0, *x_cuts, width]
+        y_edges = [0, *y_cuts, height]
+        panel_count = (len(x_edges) - 1) * (len(y_edges) - 1)
+        if panel_count < 2 or panel_count > 4:
+            return [rgb]
+
+        panels = []
+        for row in range(len(y_edges) - 1):
+            for column in range(len(x_edges) - 1):
+                panel = rgb[y_edges[row] : y_edges[row + 1], x_edges[column] : x_edges[column + 1]]
+                try:
+                    self._validate_slice_input(panel)
+                except ValueError:
+                    return [rgb]
+                panels.append(panel)
+        return panels
+
+    def _panel_gutter_cuts(self, gray: np.ndarray, axis: int) -> List[int]:
+        """Locate full-height or full-width neutral gutters in a contact sheet."""
+        dimension = gray.shape[1] if axis == 0 else gray.shape[0]
+        if dimension < 256:
+            return []
+
+        reduce_axis = 0 if axis == 0 else 1
+        dark_fraction = np.mean(gray <= 8, axis=reduce_axis)
+        bright_fraction = np.mean(gray >= 247, axis=reduce_axis)
+        flat = (dark_fraction >= 0.97) | (bright_fraction >= 0.97)
+        minimum_gutter = max(2, int(dimension * 0.006))
+        edge_margin = int(dimension * 0.12)
+
+        candidates = []
+        start = None
+        for index, is_flat in enumerate(flat):
+            if is_flat and start is None:
+                start = index
+            elif not is_flat and start is not None:
+                if index - start >= minimum_gutter:
+                    midpoint = (start + index - 1) // 2
+                    if edge_margin < midpoint < dimension - edge_margin:
+                        candidates.append(midpoint)
+                start = None
+        if start is not None and dimension - start >= minimum_gutter:
+            midpoint = (start + dimension - 1) // 2
+            if edge_margin < midpoint < dimension - edge_margin:
+                candidates.append(midpoint)
+
+        accepted = []
+        minimum_panel = max(128, int(dimension * 0.18))
+        for candidate in candidates:
+            trial = sorted([*accepted, candidate])
+            edges = [0, *trial, dimension]
+            if min(right - left for left, right in zip(edges, edges[1:])) >= minimum_panel:
+                accepted.append(candidate)
+            if len(accepted) == 3:
+                break
+        return accepted
+
     def _image_bytes_to_rgb(self, raw: bytes) -> np.ndarray:
         from io import BytesIO
 
@@ -700,9 +841,40 @@ class BrainTumorInference:
             sheet[row * 250 : (row + 1) * 250, column * 360 : (column + 1) * 360] = tile
         return sheet
 
+    def _make_study_contact_sheet(self, images: Iterable[Tuple[str, np.ndarray]]) -> np.ndarray:
+        tile_width = 360
+        tile_height = 250
+        header_height = 38
+        tiles = []
+        for label, image in images:
+            tile = np.full((tile_height, tile_width, 3), (7, 15, 18), dtype=np.uint8)
+            height, width = image.shape[:2]
+            scale = min((tile_width - 18) / max(1, width), (tile_height - header_height - 12) / max(1, height))
+            resized = cv2.resize(
+                image,
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+            x = (tile_width - resized.shape[1]) // 2
+            y = header_height + (tile_height - header_height - resized.shape[0]) // 2
+            tile[y : y + resized.shape[0], x : x + resized.shape[1]] = resized
+            cv2.rectangle(tile, (0, 0), (tile_width, header_height), (20, 29, 34), -1)
+            cv2.putText(tile, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (245, 249, 248), 2, cv2.LINE_AA)
+            tiles.append(tile)
+
+        if not tiles:
+            return np.full((tile_height, tile_width, 3), (7, 15, 18), dtype=np.uint8)
+        columns = min(2, len(tiles))
+        rows = int(np.ceil(len(tiles) / columns))
+        sheet = np.full((rows * tile_height, columns * tile_width, 3), 12, dtype=np.uint8)
+        for index, tile in enumerate(tiles):
+            row, column = divmod(index, columns)
+            sheet[row * tile_height : (row + 1) * tile_height, column * tile_width : (column + 1) * tile_width] = tile
+        return sheet
+
     def _slice_mode_message(self, findings: List[Finding]) -> str:
         if findings:
-            return "Possible tumor tissue was segmented and marked for clinical review."
+            return "Every possible region detected in the submitted MRI view or views is marked for clinical review."
         return "No tumor tissue was segmented in this view. Review the full MRI study when clinical concern remains."
 
     def _error_result(

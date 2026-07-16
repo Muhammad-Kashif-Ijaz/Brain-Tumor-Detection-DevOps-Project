@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#f5fafb">
+    <meta name="theme-color" content="#07111a">
     <meta
       name="description"
       content="CerebraVue is a clinician-led brain MRI review workspace that produces a thermal segmentation overlay for submitted imaging."
@@ -51,7 +51,7 @@
           <p class="eyebrow"><span></span> Clinician-led MRI review</p>
           <h1 id="introTitle">A clear view for brain MRI review.</h1>
           <p class="intro-text">
-            Upload a brain MRI image or video and compare the original study with a thermal map of possible tumor regions.
+            Upload one MRI image, a clearly separated set of MRI views, or a complete MRI volume and compare the original study with a thermal map of possible tumor regions.
           </p>
         </div>
         <p class="intro-note">Made for image review. Final interpretation remains with a qualified clinician.</p>
@@ -71,27 +71,60 @@
             <div class="panel-intro">
               <p class="panel-label">Step 1</p>
               <h3>Add an MRI study</h3>
-              <p>Use a single MRI image or a short MRI video. The original stays visible beside the marked result.</p>
+              <p>Choose a quick image review or a complete MRI volume. The original stays visible beside the marked result.</p>
             </div>
 
-            <label class="dropzone" id="dropzone" for="scanInput">
-              <input id="scanInput" name="scan" type="file" accept="image/*,video/*,.tif,.tiff">
-              <span class="upload-symbol" aria-hidden="true">
-                <i></i><i></i><i></i>
-              </span>
-              <strong id="singleFileName">Drop an MRI image here</strong>
-              <small>PNG, JPG, TIFF, WEBP, MP4 or MOV</small>
-              <span class="browse-file">Choose file</span>
-            </label>
+            <div class="input-mode-tabs" role="tablist" aria-label="MRI input type">
+              <button class="input-mode-tab active" type="button" data-input-mode="quick" role="tab" aria-selected="true">Image or video</button>
+              <button class="input-mode-tab recommended" type="button" data-input-mode="volume" role="tab" aria-selected="false">3D MRI volume</button>
+            </div>
+
+            <section class="input-mode-pane active" id="quickPane" data-input-pane="quick">
+              <label class="dropzone" id="dropzone" for="scanInput">
+                <input id="scanInput" name="scan" type="file" accept="image/*,video/*,.tif,.tiff">
+                <span class="upload-symbol" aria-hidden="true">
+                  <i></i><i></i><i></i>
+                </span>
+                <strong id="singleFileName">Drop an MRI image here</strong>
+                <small>MRI images or MRI video: PNG, JPG, TIFF, WEBP, MP4 or MOV</small>
+                <span class="browse-file">Choose file</span>
+              </label>
+              <button class="primary-button analysis-button" id="analyzeButton" type="submit">Analyze image</button>
+            </section>
+
+            <section class="input-mode-pane volume-pane" id="volumePane" data-input-pane="volume">
+              <p class="volume-guidance">Recommended for the most complete automated segmentation. Add four aligned NIfTI MRI sequences from one examination.</p>
+              <div class="volume-fields">
+                <label class="volume-file" for="t1cInput">
+                  <span class="volume-code">T1C</span>
+                  <span><strong>Post-contrast T1</strong><small class="volume-file-name">Required</small></span>
+                  <input id="t1cInput" name="t1c" type="file" accept=".nii,.nii.gz,.gz">
+                </label>
+                <label class="volume-file" for="t1Input">
+                  <span class="volume-code">T1</span>
+                  <span><strong>Native T1</strong><small class="volume-file-name">Required</small></span>
+                  <input id="t1Input" name="t1" type="file" accept=".nii,.nii.gz,.gz">
+                </label>
+                <label class="volume-file" for="t2Input">
+                  <span class="volume-code">T2</span>
+                  <span><strong>T2-weighted</strong><small class="volume-file-name">Required</small></span>
+                  <input id="t2Input" name="t2" type="file" accept=".nii,.nii.gz,.gz">
+                </label>
+                <label class="volume-file" for="flairInput">
+                  <span class="volume-code">FL</span>
+                  <span><strong>FLAIR</strong><small class="volume-file-name">Required</small></span>
+                  <input id="flairInput" name="flair" type="file" accept=".nii,.nii.gz,.gz">
+                </label>
+              </div>
+              <button class="primary-button analysis-button" id="volumeAnalyzeButton" type="submit">Analyze 3D MRI volume</button>
+            </section>
 
             <div class="source-line" aria-live="polite">
               <span class="source-dot" aria-hidden="true"></span>
               <span id="sourceStatus">No study selected</span>
             </div>
 
-            <button class="primary-button" id="analyzeButton" type="submit">Analyze MRI</button>
-
-            <p class="data-note">Source files are used only to prepare this review result.</p>
+            <p class="data-note">MRI studies only. For 3D review, use aligned volumes from one examination. Source files are used only to prepare this review result.</p>
           </form>
 
           <section class="imaging-panel glass-panel" id="viewerPanel" aria-labelledby="viewerTitle">

@@ -6,6 +6,7 @@ const state = {
   liveTimer: null,
   animationFrame: null,
   resultAvailable: false,
+  inputMode: "quick",
 };
 
 const singleForm = document.getElementById("singleForm");
@@ -26,7 +27,10 @@ const resultNarrative = document.getElementById("resultNarrative");
 const scanState = document.getElementById("scanState");
 const processingLabel = document.getElementById("processingLabel");
 const downloadResult = document.getElementById("downloadResult");
-const analyzeButton = document.getElementById("analyzeButton");
+const analysisButtons = document.querySelectorAll(".analysis-button");
+const inputModeTabs = document.querySelectorAll(".input-mode-tab");
+const inputModePanes = document.querySelectorAll(".input-mode-pane");
+const volumeInputs = document.querySelectorAll(".volume-file input");
 const newStudy = document.getElementById("newStudy");
 const viewerPanel = document.getElementById("viewerPanel");
 const toast = document.getElementById("toast");
@@ -56,7 +60,12 @@ function setScanState(message) {
 function setBusy(isBusy) {
   state.busy = isBusy;
   document.body.classList.toggle("is-analyzing", isBusy);
-  analyzeButton.disabled = isBusy;
+  analysisButtons.forEach((button) => {
+    button.disabled = isBusy;
+  });
+  inputModeTabs.forEach((tab) => {
+    tab.disabled = isBusy;
+  });
   startCamera.disabled = isBusy;
   captureFrame.disabled = isBusy || !state.cameraReady;
   continuousToggle.disabled = isBusy || !state.cameraReady;
@@ -87,10 +96,16 @@ function hideSourceMedia() {
   sourceVideo.load();
 }
 
-function showSourcePlaceholder() {
+function showSourcePlaceholder(
+  title = "Original study",
+  description = "Your uploaded MRI will appear here.",
+  caption = "Source view",
+) {
   hideSourceMedia();
   sourceEmpty.hidden = false;
-  sourceCaption.textContent = "Source view";
+  sourceEmpty.querySelector("strong").textContent = title;
+  sourceEmpty.querySelector("small").textContent = description;
+  sourceCaption.textContent = caption;
 }
 
 function showSourceImage(url, caption = "Image view") {
@@ -134,6 +149,54 @@ function setSourceFromFile(file) {
   }
 
   setScanState("Study ready for review");
+}
+
+function setInputMode(mode) {
+  state.inputMode = mode === "volume" ? "volume" : "quick";
+
+  inputModeTabs.forEach((tab) => {
+    const selected = tab.dataset.inputMode === state.inputMode;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", String(selected));
+  });
+  inputModePanes.forEach((pane) => {
+    pane.classList.toggle("active", pane.dataset.inputPane === state.inputMode);
+  });
+
+  revokeSourceUrl();
+  clearResult();
+
+  if (state.inputMode === "volume") {
+    showSourcePlaceholder(
+      "3D MRI volume",
+      "Add T1c, T1, T2, and FLAIR from one aligned examination.",
+      "Volume preview",
+    );
+    updateVolumeInputs();
+    return;
+  }
+
+  setSourceFromFile(scanInput.files[0]);
+}
+
+function updateVolumeInputs() {
+  const selected = [...volumeInputs].filter((input) => input.files && input.files[0]);
+  volumeInputs.forEach((input) => {
+    const file = input.files && input.files[0];
+    const field = input.closest(".volume-file");
+    field.classList.toggle("has-file", Boolean(file));
+    field.querySelector(".volume-file-name").textContent = file ? file.name : "Required";
+  });
+
+  sourceStatus.textContent = selected.length ? `${selected.length} of 4 MRI sequences selected` : "No volume selected";
+  sourceLine.classList.toggle("has-source", selected.length > 0);
+
+  if (selected.length === 4) {
+    setScanState("3D MRI volume ready for review");
+  } else {
+    const missing = 4 - selected.length;
+    setScanState(`Add ${missing} required MRI sequence${missing === 1 ? "" : "s"}`);
+  }
 }
 
 function clearResult() {
@@ -293,6 +356,9 @@ async function analyzeCurrentCameraFrame(silent = false) {
   if (!state.cameraReady || !state.cameraStream) {
     throw new Error("Start the camera preview first.");
   }
+  if (state.inputMode !== "quick") {
+    setInputMode("quick");
+  }
   const frame = captureCurrentFrame();
   revokeSourceUrl();
   clearResult();
@@ -446,6 +512,33 @@ function stopPreviewAnimation() {
 
 singleForm.addEventListener("submit", (event) => {
   event.preventDefault();
+
+  if (state.inputMode === "volume") {
+    const formData = new FormData(singleForm);
+    const missing = ["t1c", "t1", "t2", "flair"].filter((name) => {
+      const file = formData.get(name);
+      return !(file && file.name);
+    });
+
+    if (missing.length) {
+      showToast(`Add the missing MRI sequence${missing.length === 1 ? "" : "s"}: ${missing.map((name) => name.toUpperCase()).join(", ")}.`);
+      return;
+    }
+
+    revokeSourceUrl();
+    clearResult();
+    showSourcePlaceholder(
+      "3D MRI volume",
+      "Preparing a multi-plane source preview from the submitted MRI volume.",
+      "Volume preview",
+    );
+    sourceStatus.textContent = "Four MRI sequences selected";
+    sourceLine.classList.add("has-source");
+    setScanState("3D MRI volume review in progress");
+    postForm(formData);
+    return;
+  }
+
   const file = scanInput.files[0];
   if (!file) {
     showToast("Choose an MRI image or video first.");
@@ -456,6 +549,24 @@ singleForm.addEventListener("submit", (event) => {
 });
 
 scanInput.addEventListener("change", () => setSourceFromFile(scanInput.files[0]));
+
+inputModeTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    if (!state.busy) {
+      setInputMode(tab.dataset.inputMode);
+    }
+  });
+});
+
+volumeInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    if (state.inputMode !== "volume") {
+      setInputMode("volume");
+    }
+    clearResult();
+    updateVolumeInputs();
+  });
+});
 
 ["dragenter", "dragover"].forEach((eventName) => {
   dropzone.addEventListener(eventName, (event) => {
@@ -484,6 +595,9 @@ dropzone.addEventListener("drop", (event) => {
 });
 
 startCamera.addEventListener("click", async () => {
+  if (state.inputMode !== "quick") {
+    setInputMode("quick");
+  }
   if (!cameraCanRun()) {
     cameraCaptureInput.click();
     return;
@@ -511,6 +625,10 @@ cameraCaptureInput.addEventListener("change", () => {
   const file = cameraCaptureInput.files[0];
   if (!file) {
     return;
+  }
+
+  if (state.inputMode !== "quick") {
+    setInputMode("quick");
   }
 
   revokeSourceUrl();
@@ -557,12 +675,7 @@ newStudy.addEventListener("click", () => {
   revokeSourceUrl();
   singleForm.reset();
   cameraCaptureInput.value = "";
-  showSourcePlaceholder();
-  clearResult();
-  singleFileName.textContent = "Drop an MRI image here";
-  sourceStatus.textContent = "No study selected";
-  sourceLine.classList.remove("has-source");
-  setScanState("Ready for an image");
+  setInputMode("quick");
   document.getElementById("scan").scrollIntoView({ behavior: "smooth", block: "start" });
   showToast("New scan is ready.");
 });
@@ -585,6 +698,5 @@ window.addEventListener("beforeunload", () => {
 });
 
 refreshCameraState();
-showSourcePlaceholder();
-clearResult();
+setInputMode("quick");
 startPreviewAnimation();
