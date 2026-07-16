@@ -128,10 +128,11 @@ jobs:
             --form "flair=@${RUNNER_TEMP}/cerebravue-smoke/flair.nii.gz;type=application/gzip" \
             http://127.0.0.1:5000/api/analyze > volume-result.json; then
             cat volume-result.json || true
+            docker logs cerebravue-model-smoke || true
             exit 1
           fi
           cat volume-result.json
-          python -c "import json; payload = json.load(open('volume-result.json')); assert payload['status'] == 'ok', payload; assert payload['mode'] == '3d-mri', payload; assert payload.get('overlay_url'), payload; assert payload.get('source_preview_url'), payload; assert 'all-regions overview' in payload.get('details', {}).get('planes', []), payload"
+          python -c "import json; payload = json.load(open('volume-result.json')); assert payload['status'] == 'ok', payload; assert payload['mode'] == '3d-mri', payload; assert payload['model_loaded'] is True, payload; assert payload.get('overlay_url'), payload; assert payload.get('source_preview_url'), payload; assert 'all-regions overview' in payload.get('details', {}).get('planes', []), payload"
 
       - name: Show diagnostics when a check fails
         if: failure()

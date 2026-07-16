@@ -12,3 +12,4 @@ transformers==4.46.3
 huggingface-hub==0.26.5
 safetensors==0.4.5
 torch==2.4.0+cpu
+azure-monitor-opentelemetry==1.8.8

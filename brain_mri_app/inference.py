@@ -1,8 +1,6 @@
 import base64
-import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -79,6 +77,9 @@ class BrainTumorInference:
         self._slice_processor = None
         self._slice_model_lock = threading.Lock()
         self._slice_inference_lock = threading.Lock()
+        self._volume_model = None
+        self._volume_model_lock = threading.Lock()
+        self._volume_inference_lock = threading.Lock()
 
     def analyze_file(self, file_path: Path) -> AnalysisResult:
         suffix = file_path.suffix.lower()
@@ -262,40 +263,9 @@ class BrainTumorInference:
                 model_loaded=False,
             )
 
-        output_dir = self.result_folder / f".monai-{uuid.uuid4().hex}"
         try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            datalist_path = self._write_monai_datalist(modality_paths, output_dir)
-            cmd = [
-                sys.executable,
-                "-m",
-                "monai.bundle",
-                "run",
-                "--config_file",
-                str(self.monai_bundle_root / "configs" / "inference.json"),
-                "--bundle_root",
-                str(self.monai_bundle_root),
-                "--dataset_dir",
-                str(output_dir),
-                "--data_list_file_path",
-                str(datalist_path),
-                "--output_dir",
-                str(output_dir),
-                "--dataloader#num_workers",
-                "0",
-                "--evaluator#amp",
-                "false",
-            ]
-            completed = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=1200)
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "unknown inference error").strip().splitlines()[-1]
-                raise RuntimeError(f"Volumetric analysis did not complete: {detail}")
-
-            segmentation_path = self._find_segmentation(output_dir)
-            source_filename, overlay_filename, findings, subregions = self._render_segmentation_preview(
-                flair_path=modality_paths["flair"],
-                segmentation_path=segmentation_path,
-            )
+            flair, segmentation = self._segment_multimodal_volume(modality_paths)
+            source_filename, overlay_filename, findings, subregions = self._render_volume_arrays(flair, segmentation)
             message = (
                 "Possible tumor regions were segmented across the MRI volume and marked on the review image."
                 if findings
@@ -321,14 +291,10 @@ class BrainTumorInference:
             )
         except Exception as exc:
             return self._error_result("3d-mri", "nifti", started, exc, "MONAI BraTS MRI segmentation")
-        finally:
-            shutil.rmtree(output_dir, ignore_errors=True)
 
     def _monai_bundle_ready(self) -> bool:
-        config = self.monai_bundle_root / "configs" / "inference.json"
         checkpoint = self.monai_bundle_root / "models" / "model.pt"
-        scripted = self.monai_bundle_root / "models" / "model.ts"
-        return config.exists() and (checkpoint.exists() or scripted.exists())
+        return checkpoint.exists() and checkpoint.stat().st_size >= 10_000_000
 
     def slice_model_ready(self) -> bool:
         """Verify the deployed slice checkpoint can be loaded before accepting traffic."""
@@ -358,6 +324,132 @@ class BrainTumorInference:
         ]
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1200)
         return self._monai_bundle_ready()
+
+    def _load_volume_model(self):
+        """Load the pinned BraTS network once instead of launching the bundle CLI per study."""
+        if self._volume_model is not None:
+            return self._volume_model
+
+        checkpoint_path = self.monai_bundle_root / "models" / "model.pt"
+        if not checkpoint_path.exists():
+            raise RuntimeError("The BraTS MRI checkpoint is unavailable in this deployment.")
+
+        with self._volume_model_lock:
+            if self._volume_model is not None:
+                return self._volume_model
+
+            import torch
+            from monai.networks.nets import SegResNet
+
+            model = SegResNet(
+                spatial_dims=3,
+                init_filters=16,
+                in_channels=4,
+                out_channels=3,
+                dropout_prob=0.2,
+                blocks_down=(1, 2, 2, 4),
+                blocks_up=(1, 1, 1),
+            )
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            except TypeError:
+                checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+            try:
+                model.load_state_dict(self._volume_checkpoint_state(checkpoint), strict=True)
+            except RuntimeError as exc:
+                raise RuntimeError("The pinned BraTS MRI checkpoint could not be loaded.") from exc
+
+            model.eval()
+            torch.set_num_threads(max(1, min(2, os.cpu_count() or 1)))
+            self._volume_model = model
+        return self._volume_model
+
+    @staticmethod
+    def _volume_checkpoint_state(checkpoint):
+        if isinstance(checkpoint, dict):
+            for key in ("model", "state_dict", "network"):
+                candidate = checkpoint.get(key)
+                if isinstance(candidate, dict):
+                    checkpoint = candidate
+                    break
+        if not isinstance(checkpoint, dict):
+            raise RuntimeError("The BraTS MRI checkpoint has an unsupported format.")
+
+        state = {}
+        for key, value in checkpoint.items():
+            normalized_key = str(key).removeprefix("module.").removeprefix("network.")
+            state[normalized_key] = value
+        return state
+
+    def _segment_multimodal_volume(self, modality_paths: Dict[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
+        """Run the official BraTS architecture directly on four aligned MRI sequences."""
+        try:
+            import nibabel as nib
+            import torch
+            from monai.inferers import SlidingWindowInferer
+        except ImportError as exc:
+            raise RuntimeError("The volumetric MRI dependencies are unavailable in this deployment.") from exc
+
+        source_volumes = {}
+        model_channels = []
+        for name in ("t1c", "t1", "t2", "flair"):
+            volume = nib.load(str(modality_paths[name])).get_fdata(dtype=np.float32)
+            source_volumes[name] = volume
+            model_channels.append(self._normalize_brats_channel(volume))
+
+        volume_tensor = torch.from_numpy(np.ascontiguousarray(np.stack(model_channels, axis=0))).unsqueeze(0)
+        model = self._load_volume_model()
+        roi_size = self._volume_roi_size(volume_tensor.shape[-3:])
+        inferer = SlidingWindowInferer(
+            roi_size=roi_size,
+            sw_batch_size=1,
+            overlap=0.5,
+            mode="gaussian",
+            padding_mode="constant",
+        )
+        with self._volume_inference_lock, torch.inference_mode():
+            logits = inferer(volume_tensor, model)
+            probabilities = torch.sigmoid(logits)[0].float().cpu().numpy()
+        return source_volumes["flair"], self._brats_labels_from_probabilities(probabilities)
+
+    @staticmethod
+    def _normalize_brats_channel(volume: np.ndarray) -> np.ndarray:
+        """Match MONAI's channel-wise, non-zero intensity normalization."""
+        values = np.asarray(volume, dtype=np.float32)
+        normalized = np.zeros(values.shape, dtype=np.float32)
+        foreground = np.isfinite(values) & (values != 0)
+        if not np.any(foreground):
+            return normalized
+
+        foreground_values = values[foreground]
+        standard_deviation = float(np.std(foreground_values))
+        if standard_deviation < 1e-6:
+            return normalized
+        normalized[foreground] = (foreground_values - float(np.mean(foreground_values))) / standard_deviation
+        return normalized
+
+    @staticmethod
+    def _volume_roi_size(shape: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        """Avoid padding a compact valid study to a huge 240 x 240 x 160 test window."""
+        target = (240, 240, 160)
+        sizes = []
+        for dimension, preferred in zip(shape, target):
+            limited = max(32, min(int(dimension), preferred))
+            sizes.append(max(32, limited - (limited % 8)))
+        return tuple(sizes)
+
+    @staticmethod
+    def _brats_labels_from_probabilities(probabilities: np.ndarray) -> np.ndarray:
+        if probabilities.ndim != 4 or probabilities.shape[0] < 3:
+            raise RuntimeError(f"The BraTS model returned an unexpected output shape: {probabilities.shape}")
+
+        # The official bundle predicts tumor core, whole tumor, and enhancing tumor.
+        segmentation = np.zeros(probabilities.shape[1:], dtype=np.uint8)
+        segmentation[probabilities[1] >= 0.5] = 2
+        segmentation[probabilities[0] >= 0.5] = 1
+        segmentation[probabilities[2] >= 0.5] = 4
+        return segmentation
 
     def _load_slice_model(self):
         if self._slice_model is not None:
@@ -508,19 +600,6 @@ class BrainTumorInference:
                 filtered[labels == index] = 1
         return filtered
 
-    def _write_monai_datalist(self, modality_paths: Dict[str, Path], output_dir: Path) -> Path:
-        case_dir = output_dir / "case"
-        case_dir.mkdir(parents=True, exist_ok=True)
-        ordered = []
-        for name in ("t1c", "t1", "t2", "flair"):
-            source = modality_paths[name]
-            target = case_dir / f"{name}{''.join(source.suffixes)}"
-            shutil.copyfile(source, target)
-            ordered.append(str(target))
-        datalist_path = output_dir / "datalist.json"
-        datalist_path.write_text(json.dumps({"testing": [{"image": ordered}]}), encoding="utf-8")
-        return datalist_path
-
     def _validate_multimodal_study(self, modality_paths: Dict[str, Path]) -> None:
         try:
             import nibabel as nib
@@ -545,21 +624,9 @@ class BrainTumorInference:
             if image.shape != reference_shape or not np.allclose(image.affine, reference_affine, atol=1e-3):
                 raise ValueError("The four MRI sequences must have matching dimensions and spatial alignment.")
 
-    def _find_segmentation(self, output_dir: Path) -> Path:
-        candidates = sorted(output_dir.rglob("*.nii*"), key=lambda path: path.stat().st_mtime, reverse=True)
-        for path in candidates:
-            if "seg" in path.name.lower() or "pred" in path.name.lower():
-                return path
-        raise FileNotFoundError("The volumetric analysis completed without a segmentation result.")
-
-    def _render_segmentation_preview(self, flair_path: Path, segmentation_path: Path):
-        try:
-            import nibabel as nib
-        except ImportError as exc:
-            raise RuntimeError("The NIfTI preview component is unavailable.") from exc
-
-        flair = nib.load(str(flair_path)).get_fdata()
-        segmentation = self._coerce_segmentation_mask(nib.load(str(segmentation_path)).get_fdata())
+    def _render_volume_arrays(self, flair: np.ndarray, segmentation: np.ndarray):
+        flair = np.asarray(flair, dtype=np.float32)
+        segmentation = self._coerce_segmentation_mask(segmentation)
         if flair.shape[:3] != segmentation.shape[:3]:
             minimum = tuple(min(a, b) for a, b in zip(flair.shape[:3], segmentation.shape[:3]))
             flair = flair[: minimum[0], : minimum[1], : minimum[2]]
@@ -885,7 +952,13 @@ class BrainTumorInference:
         exc: Exception,
         model_name: Optional[str] = None,
     ) -> AnalysisResult:
-        LOGGER.error("MRI review failed for %s input: %s", mode, exc)
+        LOGGER.error(
+            "MRI review failed for %s input: %s",
+            mode,
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        volume_model = model_name == "MONAI BraTS MRI segmentation"
         return AnalysisResult(
             status="error",
             mode=mode,
@@ -893,5 +966,5 @@ class BrainTumorInference:
             model_name=model_name or self.quick_model_name,
             message="Unable to complete this review. Verify that the input is a usable brain MRI study and try again.",
             inference_ms=int((time.time() - started) * 1000),
-            model_loaded=self._slice_model is not None,
+            model_loaded=self._monai_bundle_ready() if volume_model else self._slice_model is not None,
         )

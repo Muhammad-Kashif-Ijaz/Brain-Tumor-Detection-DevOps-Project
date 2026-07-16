@@ -30,3 +30,6 @@ if command -v node >/dev/null 2>&1; then
   node --check static/js/app.js
   echo "syntax ok: static/js/app.js"
 fi
+
+bash -n scripts/azure_deploy.sh
+echo "syntax ok: scripts/azure_deploy.sh"

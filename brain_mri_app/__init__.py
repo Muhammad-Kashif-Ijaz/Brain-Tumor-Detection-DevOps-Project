@@ -1,6 +1,31 @@
+import logging
+import os
 from pathlib import Path
 
-from flask import Flask, request
+import flask
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _configure_azure_monitor():
+    """Enable request telemetry only when Azure injects an App Insights connection string."""
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "").strip()
+    if not connection_string:
+        return
+
+    try:
+        from azure.monitor.opentelemetry import configure_azure_monitor
+
+        configure_azure_monitor(connection_string=connection_string)
+    except Exception:
+        # Telemetry must never prevent MRI review traffic from starting.
+        LOGGER.exception("Azure Monitor telemetry could not be configured.")
+
+
+_configure_azure_monitor()
+
+from flask import request
 
 from .config import BASE_DIR, DefaultConfig
 from .inference import BrainTumorInference
@@ -8,7 +33,7 @@ from .routes import bp
 
 
 def create_app(config_override=None):
-    app = Flask(
+    app = flask.Flask(
         __name__,
         template_folder=str(BASE_DIR / "templates"),
         static_folder=str(BASE_DIR / "static"),

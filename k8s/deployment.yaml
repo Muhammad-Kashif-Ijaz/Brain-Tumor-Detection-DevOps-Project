@@ -9,6 +9,11 @@ spec:
   replicas: 1
   revisionHistoryLimit: 2
   progressDeadlineSeconds: 900
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: neuroscope-mri
@@ -49,6 +54,13 @@ spec:
               value: "10"
             - name: MODEL_BUNDLE_DIR
               value: /app/models
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: application-insights-secret
+                  key: connection-string
+            - name: OTEL_SERVICE_NAME
+              value: neuroscope-mri
             - name: UPLOAD_FOLDER
               value: /app/instance/uploads
             - name: RESULT_FOLDER

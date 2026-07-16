@@ -54,11 +54,11 @@ The default Terraform settings are sized for an Azure free/trial demo: one `Stan
 
 If Azure rejects the VM size in your region, copy the smallest allowed size from the workflow error and set `AKS_NODE_VM_SIZE` in `.github/workflows/deploy-azure.yml`.
 
-The deployment script checks candidate Azure regions before running Terraform. If the default region has 0 vCPU quota, it tries the next region listed in `AZURE_LOCATION_CANDIDATES`. If every checked region has 0 quota, request a quota increase in Azure Portal or change `AZURE_LOCATION_CANDIDATES` to include a region where your subscription has quota.
+For a new deployment, the script checks up to three candidate Azure regions before running Terraform. If the default region has 0 vCPU quota, it tries the next candidate. If an application resource group already exists, its Azure region is retained and the script fails quickly if that region has insufficient quota; Azure cannot move a resource group between regions.
 
 Terraform state storage may stay in the original region even when the app region changes. The deployment script reuses the existing state resource group location and deploys the AKS app resources in the selected quota-friendly region.
 
-The Kubernetes deployment is applied cleanly each run: the workflow renders the real container image directly into the manifest, replaces the previous demo deployment, waits up to 20 minutes, and prints pod events/logs automatically if rollout fails.
+The Kubernetes deployment is applied in place on every run: the workflow renders the real container image directly into the manifest, uses a zero-surge rollout so a one-node demo does not need to schedule a second model pod, waits up to 20 minutes, prints pod events/logs automatically if rollout fails, and verifies the public `/healthz` endpoint before reporting success.
 
 Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal JSON:
 
@@ -71,6 +71,8 @@ Create one GitHub secret named `AZURE_CREDENTIALS` with Azure service principal 
 }
 ```
 
+The service principal in that one secret must have **Contributor** and **User Access Administrator** at the subscription scope, or the broader **Owner** role. The second permission lets Terraform grant the AKS kubelet identity the `AcrPull` role on the registry; it does not require another GitHub secret.
+
 Then push to `main`. The model container smoke test builds the image, requires the trained slice checkpoint to load, and exercises both single-view and multi-view MRI uploads. Azure deployment starts only after that check succeeds. You can still use the manual deployment workflow when needed.
 
 The workflow automatically:
@@ -81,6 +83,10 @@ The workflow automatically:
 4. Deploys the app to AKS.
 5. Mounts Azure Files for temporary uploads and generated review images.
 6. Enables Azure Monitor Container Insights through Log Analytics.
+7. Sends Flask request telemetry to the provisioned Application Insights resource.
+8. Confirms the public load balancer endpoint returns a healthy response.
+
+The workflow serializes deployments, persists Terraform state in an Azure Storage backend, and repairs state only for Azure resources with the expected deterministic names. If an earlier broken run left a differently named registry or storage account behind, it is left untouched rather than deleted automatically.
 
 ## Jenkins
 
@@ -92,7 +98,7 @@ The included `Jenkinsfile` runs the same deployment script. Jenkins cannot read 
 - Azure Container Registry for container images.
 - Azure Files for generated review images and temporary application storage. Model checkpoints are baked into the container image.
 - Log Analytics Workspace for Azure Monitor Container Insights.
-- Application Insights workspace resource for web monitoring expansion.
+- Application Insights with OpenTelemetry request telemetry from the Flask application.
 - Terraform backend storage account and container.
 
 Azure Container Service (ACS) is retired; this project uses AKS, the supported Azure Kubernetes platform.
@@ -108,4 +114,4 @@ The app exposes:
 - `/healthz` for health probes.
 - `/metrics` for Prometheus-style application counters.
 
-In Azure Portal, open the AKS resource and use **Insights** to see CPU, memory, pod health, restarts, and logs. The Terraform deployment connects AKS to the Log Analytics workspace automatically.
+In Azure Portal, open the AKS resource and use **Insights** to see CPU, memory, pod health, restarts, and logs. Open the Application Insights resource to see Flask requests, failures, response timing, and dependency telemetry. The Terraform deployment connects AKS to Log Analytics automatically and injects the Application Insights connection string into the Kubernetes app secret.
